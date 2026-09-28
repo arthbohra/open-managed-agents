@@ -4,7 +4,7 @@ This document covers the core concepts, lifecycle, and configuration of agents i
 
 ## Engineering and release constraints (read before changing runtime code)
 
-These rules apply to coding agents and human reviewers. Local single-process development remains supported; **production multi-replica claims require separate evidence**. Never infer production readiness from a port interface, a mock, an image build, or a healthy Pod.
+These rules apply to coding agents and human reviewers. Read [Managed Session persistence: documented semantics vs implementation](docs/managed-session-persistence-contract.md) before changing memory or outputs. Local single-process development remains supported; **production multi-replica claims require separate evidence**. Never infer production readiness from a port interface, a mock, an image build, or a healthy Pod.
 
 - Trace the full data path: API → application → adapter → sandbox → synchronization → durable store → read path. Name the source of truth and each process-local cache. Do not call a `best_effort` capability durable without proving its collection destination and recovery behavior.
 - For any memory, files, outputs, session-event, lease, or sandbox lifecycle change, write a regression test that fails before the fix. Test two *independent* control-plane instances against the same database/object store: write through A, read through B, stop A, continue through B. Include an expired owner/fence test; stale attempts must never overwrite canonical data. Do not replace this test with two objects in one process or an in-memory fake of the shared store.
