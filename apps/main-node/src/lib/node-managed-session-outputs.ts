@@ -25,6 +25,7 @@ export interface SynchronizeNodeManagedSessionOutputs {
   sessionId: string;
   sandbox: SandboxExecutor;
   executionFence: SessionExecutionFence;
+  runtimeGeneration?: string;
 }
 
 export interface NodeManagedSessionOutputCollectorDependencies {
@@ -166,6 +167,7 @@ export class NodeManagedSessionOutputCollector {
         await this.dependencies.shared.publish({
           workspaceId: input.workspaceId, sessionId: input.sessionId,
           fence: input.executionFence, files: readFiles(),
+          ...(input.runtimeGeneration === undefined ? {} : { runtimeGeneration: input.runtimeGeneration }),
         });
         return;
       }

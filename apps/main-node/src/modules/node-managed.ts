@@ -379,6 +379,10 @@ export async function createManagedNodeRuntime(
         session.id,
         join(config.paths.sandboxWorkdir, session.id),
       ),
+    ...(sharedSessionOutputs === undefined ? {} : {
+      isSandboxCurrent: ({ workspaceId, session, runtimeGeneration }: { workspaceId: string; session: { id: string }; runtimeGeneration: string }) =>
+        sharedSessionOutputs.isSandboxCurrent(workspaceId, session.id, runtimeGeneration),
+    }),
     prepareSandbox: async ({
       workspaceId,
       session,
@@ -403,15 +407,16 @@ export async function createManagedNodeRuntime(
           },
         ),
       });
+      // Shared outputs are not a live mount: hydrate canonical files into a
+      // fresh sandbox before inputs are staged, so input mounts under the
+      // outputs directory win and the next turn can read prior outputs.
+      await sharedSessionOutputs?.restoreToSandbox(workspaceId, session.id, sandbox, runtimeGeneration);
       await preparer.prepare({
         workspaceId,
         session,
         sandbox,
         runtimeGeneration,
       });
-      // Shared outputs are not a live mount: hydrate canonical files into a
-      // fresh sandbox so the next turn can read (and republish) prior outputs.
-      await sharedSessionOutputs?.restoreToSandbox(workspaceId, session.id, sandbox);
     },
     synchronizeSandbox: async ({
       workspaceId,
@@ -466,6 +471,7 @@ export async function createManagedNodeRuntime(
         sessionId: session.id,
         sandbox,
         executionFence,
+        runtimeGeneration,
       });
     },
     afterExecution: withReportedArtifactPublication(createNodeOpenAIArtifactPublisher({

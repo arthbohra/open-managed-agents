@@ -44,6 +44,32 @@ async function sandbox(): Promise<SandboxExecutor> {
   } as SandboxExecutor;
 }
 
+/** Minimal ustar writer so tests can craft archives `tar -c` never produces. */
+function craftTar(entries: Array<{ name: string; type: "0" | "1" | "2" | "5"; link?: string; body?: string }>): Uint8Array {
+  const blocks: Uint8Array[] = [];
+  for (const entry of entries) {
+    const body = new TextEncoder().encode(entry.body ?? "");
+    const header = new Uint8Array(512);
+    const put = (offset: number, length: number, value: string) => header.set(new TextEncoder().encode(value).subarray(0, length), offset);
+    put(0, 100, entry.name);
+    put(100, 8, "0000755\0"); put(108, 8, "0000000\0"); put(116, 8, "0000000\0");
+    put(124, 12, `${body.byteLength.toString(8).padStart(11, "0")}\0`);
+    put(136, 12, "00000000000\0");
+    put(148, 8, "        ");
+    put(156, 1, entry.type);
+    put(157, 100, entry.link ?? "");
+    put(257, 6, "ustar\0"); put(263, 2, "00");
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    put(148, 8, `${sum.toString(8).padStart(6, "0")}\0 `);
+    blocks.push(header, body, new Uint8Array((512 - (body.byteLength % 512)) % 512));
+  }
+  blocks.push(new Uint8Array(1024));
+  const out = new Uint8Array(blocks.reduce((total, block) => total + block.byteLength, 0));
+  let offset = 0;
+  for (const block of blocks) { out.set(block, offset); offset += block.byteLength; }
+  return out;
+}
+
 const scope = { workspaceId: "workspace_1", environmentId: "env_1", sessionId: "session_1", workId: "exec_1" };
 
 async function fixture() {
@@ -266,6 +292,35 @@ describe("official Node Managed Session workspace checkpoints", () => {
     await expect(second.readFile("/workspace/uncommitted.txt")).rejects.toThrow(/ENOENT/);
   });
 
+  it("rebuilds a warm sandbox when a runtime-state hook reports it is no longer current", async () => {
+    const first = await sandbox();
+    const second = await sandbox();
+    let allocations = 0;
+    let current = true;
+    const generations: string[] = [];
+    const runner = new DefaultNodeManagedSessionRunner({
+      buildSandbox: async () => ++allocations === 1 ? first : second,
+      prepareSandbox: async ({ runtimeGeneration }) => { generations.push(runtimeGeneration); },
+      isSandboxCurrent: async ({ runtimeGeneration }) => current && runtimeGeneration === generations[0],
+      outcomes: { evaluate: async () => { throw new Error("unexpected"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected"); } },
+      buildModel: async () => ({} as never), buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input as never,
+      clock: { now: () => new Date() }, ids: { nextEventId: () => "evt_1" },
+    });
+    const start = { workspaceId: scope.workspaceId, sessionId: scope.sessionId,
+      session: { id: scope.sessionId, resources: [], agent: { skills: [] } } as never,
+      environment: { id: scope.environmentId, config: {} } as never, initialEvents: [] };
+    await runner.start(start);
+    await runner.start(start);
+    expect(allocations).toBe(1);
+    current = false;
+    await runner.start(start);
+    expect(allocations).toBe(2);
+    expect(runner.connectedSandbox(scope)).toBe(second);
+  });
+
   it("fails closed on the real local-subprocess exit suffix during archive and restore", async () => {
     const { checkpoints, fence } = await fixture();
     const source = await sandbox();
@@ -304,37 +359,70 @@ describe("official Node Managed Session workspace checkpoints", () => {
     expect(candidate.contentHash).toMatch(/^sha256:/);
   });
 
-  it("rejects workspace symlinks escaping the archive root before publishing bytes", async () => {
-    const { checkpoints, blobs, fence } = await fixture();
+  it("checkpoints ordinary absolute symlinks such as a Python venv interpreter link", async () => {
+    const { checkpoints, fence } = await fixture();
     const source = await sandbox();
-    expect(await source.exec("ln -s /etc/passwd /workspace/escape")).toBe("");
-    const upload = vi.spyOn(blobs, "put");
-    await expect(createCandidate(checkpoints, source, fence)).rejects.toThrow(/unsafe workspace archive/i);
-    expect(upload).not.toHaveBeenCalled();
+    expect(await source.exec("mkdir -p /workspace/.venv/bin && ln -s /usr/bin/python3 /workspace/.venv/bin/python3")).toBe("");
+    const candidate = await createCandidate(checkpoints, source, fence);
+    expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
   });
 
-  it("refuses an unsafe canonical archive before writing bytes into the replacement sandbox", async () => {
+  for (const [label, entries] of [
+    ["writes through an absolute symlink", [
+      { name: "escape", type: "2" as const, link: "/etc" },
+      { name: "escape/evil", type: "0" as const, body: "owned" }]],
+    ["chains relative symlinks to escape", [
+      { name: "y", type: "2" as const, link: "." },
+      { name: "x", type: "2" as const, link: "y/.." },
+      { name: "x/evil", type: "0" as const, body: "owned" }]],
+    ["hardlinks outside the archive", [
+      { name: "leak", type: "1" as const, link: "/etc/passwd" }]],
+    ["uses a parent path segment", [
+      { name: "../evil", type: "0" as const, body: "owned" }]],
+  ] as const) {
+    it(`refuses a canonical archive that ${label} before writing into the replacement sandbox`, async () => {
+      const { checkpoints, blobs, fence } = await fixture();
+      const bytes = craftTar([...entries]);
+      const id = `wsc_${randomUUID()}`;
+      const key = `managed-session-workspace-checkpoints/${scope.workspaceId}/${scope.sessionId}/${id}.tar`;
+      await blobs.put(key, bytes);
+      const candidate = { id, contentHash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+        revision: fence.generation, metadata: { "openma.workspace.blob-key.v1": key } };
+      expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
+      const fresh = await sandbox();
+      const write = vi.spyOn(fresh, "writeFileBytes");
+      const port = checkpoints.port(fresh);
+      const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+      const binding = await port.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+        activeCheckpoint: candidate, idempotencyKey: "unsafe", signal: new AbortController().signal });
+      await expect(port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
+        sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal }))
+        .rejects.toThrow(/unsafe workspace archive/i);
+      expect(write).not.toHaveBeenCalled();
+    });
+  }
+
+  it("accepts a crafted archive whose symlinks are only leaves", async () => {
     const { checkpoints, blobs, fence } = await fixture();
-    const source = await sandbox();
-    expect(await source.exec("ln -s /etc/passwd /workspace/escape && tar -C /workspace -cf /var/tmp/unsafe.tar .")).toBe("");
-    const bytes = await source.readFileBytes!("/var/tmp/unsafe.tar");
+    const bytes = craftTar([
+      { name: "bin/", type: "5" },
+      { name: "bin/python3", type: "2", link: "/usr/bin/python3" },
+      { name: "report.txt", type: "0", body: "ok" },
+      { name: "copy.txt", type: "1", link: "report.txt" },
+    ]);
     const id = `wsc_${randomUUID()}`;
     const key = `managed-session-workspace-checkpoints/${scope.workspaceId}/${scope.sessionId}/${id}.tar`;
     await blobs.put(key, bytes);
     const candidate = { id, contentHash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
       revision: fence.generation, metadata: { "openma.workspace.blob-key.v1": key } };
-    expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
     const fresh = await sandbox();
-    const write = vi.spyOn(fresh, "writeFileBytes");
     const port = checkpoints.port(fresh);
     const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
     const binding = await port.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
-      activeCheckpoint: candidate, idempotencyKey: "unsafe", signal: new AbortController().signal });
-    await expect(port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
-      sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal }))
-      .rejects.toThrow(/unsafe workspace archive/i);
-    expect(write).not.toHaveBeenCalled();
-    expect((await checkpoints.active(scope))?.candidate.id).toBe(id);
+      activeCheckpoint: candidate, idempotencyKey: "leaf", signal: new AbortController().signal });
+    await port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
+      sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal });
+    expect(await fresh.readFile("/workspace/copy.txt")).toBe("ok");
   });
 
   it("accepts relative symlinks contained entirely within /workspace", async () => {

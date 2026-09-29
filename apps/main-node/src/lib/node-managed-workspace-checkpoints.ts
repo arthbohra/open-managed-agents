@@ -24,29 +24,49 @@ function digest(bytes: Uint8Array): string {
 }
 
 /** Validate the effective (PAX/GNU-long-name-aware) entries before either
- * uploading or extracting. tar's extraction defaults are not an isolation
- * boundary for absolute/escaping symlinks or hardlinks. */
+ * uploading or extracting. Symlinks may point anywhere (a venv links to
+ * /usr/bin/python3); what is refused is any later entry whose path passes
+ * *through* a symlink, which is how archives escape the extraction root.
+ * Hardlinks must name an earlier in-archive path. */
 async function validateWorkspaceArchive(bytes: Uint8Array): Promise<void> {
   // Checkpoints are produced with `tar -cf`, never compressed. Do not let a
   // hostile compressed archive expand without an uncompressed size bound.
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) throw new Error("Unsafe workspace archive: compressed input");
+  const normalize = (name: string): string | null => {
+    const trimmed = name.replace(/^(\.\/)+/u, "").replace(/\/+$/u, "");
+    if (trimmed === "" || trimmed === ".") return "";
+    if (posix.isAbsolute(trimmed) || trimmed.includes("\0")) return null;
+    const parts = trimmed.split("/");
+    if (parts.some((part) => part === ".." || part === "")) return null;
+    return parts.filter((part) => part !== ".").join("/");
+  };
   await new Promise<void>((resolve, reject) => {
     let invalid: Error | null = null;
     let entries = 0;
+    const symlinks = new Set<string>();
+    const throughSymlink = (path: string): boolean => {
+      const parts = path.split("/");
+      for (let i = 1; i <= parts.length; i++) if (symlinks.has(parts.slice(0, i).join("/"))) return true;
+      return false;
+    };
+    const fail = (reason: string) => { invalid ??= new Error(`Unsafe workspace archive: ${reason}`); };
     const parser = new Parser({ strict: true, maxMetaEntrySize: 1024 * 1024,
       onReadEntry: (entry) => {
-        if (++entries > 100_000) invalid ??= new Error("Unsafe workspace archive: too many entries");
-        const name = entry.path;
-        if (posix.isAbsolute(name) || name.split("/").includes("..") || name.includes("\0") ||
-          !["Directory", "File", "OldFile", "ContiguousFile", "SymbolicLink", "Link"].includes(entry.type)) {
-          invalid ??= new Error("Unsafe workspace archive: invalid path or entry type");
-        }
-        if (entry.type === "SymbolicLink" || entry.type === "Link") {
-          const link = entry.linkpath ?? "";
-          const target = entry.type === "SymbolicLink" ? posix.join(posix.dirname(name), link) : link;
-          if (!link || posix.isAbsolute(link) || posix.normalize(target) === ".." || posix.normalize(target).startsWith("../")) {
-            invalid ??= new Error("Unsafe workspace archive: link escapes /workspace");
-          }
+        if (++entries > 100_000) fail("too many entries");
+        const name = normalize(entry.path);
+        if (name === null) fail("invalid path");
+        else if (!["Directory", "File", "OldFile", "ContiguousFile", "SymbolicLink", "Link", "FIFO"].includes(entry.type)) {
+          fail("unsupported entry type");
+        } else if (name !== "" && throughSymlink(name)) {
+          // Includes re-declaring a symlink path as a file or directory.
+          fail("entry passes through a symlink");
+        } else if (entry.type === "SymbolicLink") {
+          if (!entry.linkpath || entry.linkpath.includes("\0")) fail("invalid symlink");
+          else if (name === "") fail("symlink replaces the workspace root");
+          else symlinks.add(name);
+        } else if (entry.type === "Link") {
+          const target = normalize(entry.linkpath ?? "");
+          if (target === null || target === "" || throughSymlink(target)) fail("hardlink escapes /workspace");
         }
         entry.resume();
       },

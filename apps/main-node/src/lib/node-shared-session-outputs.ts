@@ -70,7 +70,25 @@ async function boundedJson(blob: { body: ReadableStream<Uint8Array>; size: numbe
 /** Immutable output candidates in a shared blob backend, with one fenced SQL
  * pointer per Session. It is intentionally separate from workspace snapshots. */
 export class NodeSharedSessionOutputs {
+  /** Canonical candidate each live sandbox (runtime generation) was hydrated
+   * from. Publication CASes against it, so a warm sandbox that missed another
+   * replica's newer outputs can never replace them with its older full set. */
+  private readonly bases = new Map<string, string | null>();
+
   constructor(private readonly deps: { sql: SqlClient; blobs: BlobStore }) {}
+
+  private baseKey(workspaceId: string, sessionId: string, runtimeGeneration: string): string {
+    return `${workspaceId}\0${sessionId}\0${runtimeGeneration}`;
+  }
+
+  /** False when another owner published since this sandbox was hydrated. */
+  async isSandboxCurrent(workspaceId: string, sessionId: string, runtimeGeneration: string): Promise<boolean> {
+    const key = this.baseKey(workspaceId, sessionId, runtimeGeneration);
+    if (!this.bases.has(key)) return false;
+    if (await this.pointer(workspaceId, sessionId) === this.bases.get(key)) return true;
+    this.bases.delete(key);
+    return false;
+  }
 
   async ensureSchema(dialect?: "mysql" | "sqlite" | "postgres"): Promise<void> {
     // Node's consolidated MySQL execution schema uses utf8mb4_unicode_ci;
@@ -114,8 +132,15 @@ export class NodeSharedSessionOutputs {
   async publish(input: {
     workspaceId: string; sessionId: string; fence: SessionExecutionFence;
     files: AsyncIterable<readonly [string, Uint8Array]> | Iterable<readonly [string, Uint8Array]>;
+    /** The sandbox whose outputs are published; its hydration base is the CAS value. */
+    runtimeGeneration?: string;
   }): Promise<void> {
     const { workspaceId, sessionId, fence, files } = input;
+    const baseKey = input.runtimeGeneration === undefined ? null
+      : this.baseKey(workspaceId, sessionId, input.runtimeGeneration);
+    if (baseKey !== null && !this.bases.has(baseKey)) {
+      throw new Error("Session output sandbox was not hydrated from a canonical version");
+    }
     const root = prefix(workspaceId, sessionId);
     if (fence.workspaceId !== workspaceId || fence.sessionId !== sessionId) throw new Error("Session output fence scope mismatch");
     const id = `out_${randomUUID()}`;
@@ -155,7 +180,7 @@ export class NodeSharedSessionOutputs {
         precondition: { type: "ifNoneMatch", value: "*" }, httpMetadata: { contentType: "application/json" },
       });
       if (written === null) throw new Error("Session output manifest already exists");
-      const expected = await this.pointer(workspaceId, sessionId);
+      const expected = baseKey === null ? await this.pointer(workspaceId, sessionId) : this.bases.get(baseKey)!;
       const now = Date.now();
       const where = `workspace_id = ? AND id = ? AND session_id = ? AND state = 'running'
         AND attempt_id = ? AND owner_id = ? AND generation = ? AND lease_expires_at_ms > ?`;
@@ -193,6 +218,7 @@ export class NodeSharedSessionOutputs {
         results[4]?.meta.changes !== 1) {
         throw new Error("Session output publication lost its execution fence or canonical pointer");
       }
+      if (baseKey !== null) this.bases.set(baseKey, id);
     } catch (error) {
       // Never delete a blob that may have become canonical. The GC scheduler
       // reclaims failed candidates (also covering crashes during upload).
@@ -207,9 +233,12 @@ export class NodeSharedSessionOutputs {
 
   /** Hydrate ordinary outputs in a fresh sandbox before input staging. This is
    * not a live mount; read/write on a turn is published at its next safe point. */
-  async restoreToSandbox(workspaceId: string, sessionId: string, sandbox: SandboxExecutor): Promise<void> {
+  async restoreToSandbox(workspaceId: string, sessionId: string, sandbox: SandboxExecutor, runtimeGeneration?: string): Promise<void> {
     const current = await this.manifest(workspaceId, sessionId);
-    if (current === null) return;
+    const record = (base: string | null) => {
+      if (runtimeGeneration !== undefined) this.bases.set(this.baseKey(workspaceId, sessionId, runtimeGeneration), base);
+    };
+    if (current === null) { record(null); return; }
     if (!sandbox.writeFileBytes) throw new Error("Shared Session outputs require binary sandbox writes for restore");
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     for (const entry of current.manifest.files) {
@@ -229,6 +258,7 @@ export class NodeSharedSessionOutputs {
     if (await this.pointer(workspaceId, sessionId) !== current.id) {
       throw new Error("Canonical Session outputs changed during restore; reacquire the sandbox");
     }
+    record(current.id);
   }
 
   async list(workspaceId: string, sessionId: string) {

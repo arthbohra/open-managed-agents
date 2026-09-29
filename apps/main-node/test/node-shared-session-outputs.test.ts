@@ -145,6 +145,26 @@ describe("shared official Session outputs", () => {
     expect(await text(value!.body as ReadableStream<Uint8Array>)).toBe("canonical");
   });
 
+  it("refuses to publish from a warm sandbox restored from an older canonical version", async () => {
+    const f = await fixture();
+    const files = (text: string) => new Map([["report.txt", new TextEncoder().encode(text)]]);
+    const sandboxFor = () => ({ exec: async () => "", writeFileBytes: async () => "" }) as unknown as SandboxExecutor;
+    // Replica A prepares a sandbox (nothing canonical yet) and publishes turn 1.
+    await f.writer.restoreToSandbox("tenant_1", "session_1", sandboxFor(), "gen_a");
+    await f.writer.publish({ workspaceId: "tenant_1", sessionId: "session_1", fence: f.fence, files: files("turn-1"), runtimeGeneration: "gen_a" });
+    expect(await f.writer.isSandboxCurrent("tenant_1", "session_1", "gen_a")).toBe(true);
+    // Replica B restores turn 1 into a fresh sandbox and publishes turn 2.
+    await f.reader.restoreToSandbox("tenant_1", "session_1", sandboxFor(), "gen_b");
+    await f.reader.publish({ workspaceId: "tenant_1", sessionId: "session_1", fence: f.fence, files: files("turn-2"), runtimeGeneration: "gen_b" });
+    // A's warm sandbox is now stale: it must not be reused, and its full-manifest
+    // publication must not replace B's newer outputs.
+    await expect(f.writer.publish({ workspaceId: "tenant_1", sessionId: "session_1", fence: f.fence,
+      files: files("stale-turn-3"), runtimeGeneration: "gen_a" })).rejects.toThrow(/canonical pointer/i);
+    expect(await f.writer.isSandboxCurrent("tenant_1", "session_1", "gen_a")).toBe(false);
+    const current = await f.reader.read("tenant_1", "session_1", "report.txt");
+    expect(await text(current!.body as ReadableStream<Uint8Array>)).toBe("turn-2");
+  });
+
   it("does not delete a newer canonical pointer if it changes while an older output is being cleaned up", async () => {
     const stored = new InMemoryBlobStore();
     let release!: () => void;

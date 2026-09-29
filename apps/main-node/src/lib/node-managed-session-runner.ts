@@ -132,6 +132,9 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
     runtimeGeneration: string;
   }): Promise<void>;
   /** Fenced turn barrier for provider-neutral writable state reconciliation. */
+  /** Extra runtime-state check before reusing a warm sandbox (for example
+   * shared Session outputs advanced by another replica). */
+  isSandboxCurrent?(input: ManagedRunnerContext & { runtimeGeneration: string }): Promise<boolean>;
   synchronizeSandbox?(input: ManagedRunnerContext & {
     sandbox: SandboxExecutor;
     runtimeGeneration: string;
@@ -218,7 +221,11 @@ export class DefaultNodeManagedSessionRunner
     if (
       existing !== undefined &&
       this.sandboxConfigurationFingerprints.get(input) === fingerprint &&
-      (this.dependencies.workspaceCheckpoints === undefined || this.workspaces.get(input)?.trusted === true)
+      (this.dependencies.workspaceCheckpoints === undefined || this.workspaces.get(input)?.trusted === true) &&
+      (this.dependencies.isSandboxCurrent === undefined || await this.dependencies.isSandboxCurrent({
+        workspaceId: input.workspaceId, session: input.session, environment: input.environment,
+        runtimeGeneration: this.runtimeGenerations.get(input)!,
+      }))
     ) return;
     if (existing !== undefined) {
       const previousWorkspace = this.workspaces.get(input);
