@@ -54,6 +54,7 @@ import {
 
 const checkpointMetadataKey = "openma.runtime.checkpoint.v1";
 const ephemeralWorkspaceMetadataKey = "openma.workspace.ephemeral.v1";
+const durableMountWorkspaceMetadataKey = "openma.workspace.durable-mount.v1";
 
 type ProviderRuntime = SandboxPort & SandboxRuntimePort;
 
@@ -185,6 +186,17 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
     >[];
     retainedSuspendKind?: SandboxCheckpointKind;
     portableCheckpointKind?: SandboxCheckpointKind;
+    /** A live, unversioned object-store mount, NOT a filesystem checkpoint.
+     * The stable identity must name the exact bucket/prefix without secrets. */
+    durableMount?: {
+      identity(scope: RuntimeResourceScope): string;
+      attach(input: {
+        runtime: Runtime;
+        scope: RuntimeResourceScope;
+        binding: WorkspaceBinding;
+        signal: AbortSignal;
+      }): Promise<void>;
+    };
   };
   outputs?: {
     /** Durable candidate store. The active pointer remains FencePort-owned. */
@@ -1301,20 +1313,42 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
           },
         };
 
+  function durableMountIdentity(scope: RuntimeResourceScope): string {
+    const identity = options.workspace.durableMount?.identity(scope);
+    if (!identity) throw new Error("Provider workspace has no durable mount identity");
+    return identity;
+  }
+
   const workspace: WorkspacePersistencePort = {
     async capabilities() {
-      return { strategies: options.workspace.strategies };
+      return {
+        strategies: [
+          ...options.workspace.strategies,
+          ...(options.workspace.durableMount === undefined ? [] : ["durable_mount" as const]),
+        ],
+      };
     },
 
     async materialize(input) {
       input.signal.throwIfAborted();
-      if (!options.workspace.strategies.includes(
-        input.strategy as "retained_runtime" | "checkpoint_restore" | "ephemeral",
-      )) {
+      if (input.strategy === "durable_mount") {
+        if (options.workspace.durableMount === undefined) {
+          throw new Error("Provider workspace does not support durable_mount");
+        }
+        if (input.activeCheckpoint !== null) {
+          const identity = durableMountIdentity(input.scope);
+          if (
+            input.activeCheckpoint.metadata?.[durableMountWorkspaceMetadataKey] !== identity
+            || input.activeCheckpoint.contentHash !== `sha256:${await sha256(identity)}`
+          ) {
+            throw new Error("Runtime workspace mount identity mismatch");
+          }
+        }
+      } else if (!options.workspace.strategies.includes(input.strategy)) {
         throw new Error(`Provider workspace does not support ${input.strategy}`);
       }
       const bindingId = `provider-ws-${input.scope.workId}-${input.fence.generation}`;
-      if (input.activeCheckpoint !== null && input.strategy !== "ephemeral") {
+      if (input.activeCheckpoint !== null && input.strategy !== "ephemeral" && input.strategy !== "durable_mount") {
         const checkpoint = parseCheckpoint(
           input.activeCheckpoint.metadata?.[checkpointMetadataKey],
           options.providerName,
@@ -1341,9 +1375,23 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
       } satisfies WorkspaceBinding;
     },
 
-    async attach() {
-      // Restore/resume happens atomically with provider acquisition. There is
-      // no host path to mount after the remote runtime exists.
+    async attach(input) {
+      input.signal.throwIfAborted();
+      if (input.strategy !== "durable_mount") {
+        // Restore/resume happens atomically with provider acquisition.
+        return;
+      }
+      const durableMount = options.workspace.durableMount;
+      if (durableMount === undefined) {
+        throw new Error("Provider workspace does not support durable_mount");
+      }
+      await durableMount.attach({
+        runtime: requireRuntime(input.sandbox),
+        scope: input.scope,
+        binding: input.binding,
+        signal: input.signal,
+      });
+      input.signal.throwIfAborted();
     },
 
     async checkpoint(input): Promise<WorkspaceCheckpointCandidate> {
@@ -1364,6 +1412,19 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
           kind,
           name: input.idempotencyKey,
         });
+      } else if (input.strategy === "durable_mount") {
+        // The host's publication contract requires a workspace candidate.
+        // This is a stable binding reference, not a snapshot of mount contents;
+        // publishing it must not be presented as a rollback/version feature.
+        const identity = durableMountIdentity(input.scope);
+        const hash = await sha256(identity);
+        input.signal.throwIfAborted();
+        return {
+          id: `wmr_${hash}`,
+          contentHash: `sha256:${hash}`,
+          revision: input.fence.generation,
+          metadata: { [durableMountWorkspaceMetadataKey]: identity },
+        };
       } else if (input.strategy === "ephemeral") {
         const marker = JSON.stringify({
           provider: options.providerName,
