@@ -322,6 +322,11 @@ describe.sequential("real MySQL + MinIO, independent process and sandbox storage
       expect(failed?.failure).toMatch(/archive.*missing|restore failed/i);
       expect(modelRequests.length).toBe(beforeRestore);
       expect((await pointer())?.candidate_id).toBe(canonical!.candidate_id);
+    } catch (error) {
+      // Owner processes are separate OS processes; surface why one disconnected.
+      const exits = children.map((child) => `${child.pid}:exit=${child.exitCode}/signal=${child.signalCode}`).join(" ");
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nowners: ${exits}\n${logs.join("").slice(-8000)}`,
+        { cause: error });
     } finally {
       await Promise.all(children.map((child) => killProcessTree(child).catch(() => undefined)));
       await sql.close();
