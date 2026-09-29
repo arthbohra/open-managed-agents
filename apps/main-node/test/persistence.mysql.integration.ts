@@ -4,6 +4,7 @@ import { createServer as createNetServer } from "node:net";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { accessSync, constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
@@ -184,6 +185,11 @@ describe.sequential("real MySQL + MinIO, independent process and sandbox storage
       server.listen(0, "127.0.0.1", () => { const address = server.address();
         server.close(() => address && typeof address !== "string" ? resolvePort(address.port) : reject(new Error("no port"))); });
     });
+    if (process.platform === "linux") {
+      // Litebox aborts the whole owner process (not a catchable error) without KVM.
+      try { accessSync("/dev/kvm", constants.R_OK | constants.W_OK); }
+      catch { throw new Error("Litebox needs read/write access to /dev/kvm on Linux (see the CI 'Enable KVM for Litebox' step)"); }
+    }
     const launch = async (owner: string) => {
       const port = await availablePort();
       const inherited = Object.fromEntries(["PATH", "HOME", "USER", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL"]
