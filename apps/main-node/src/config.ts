@@ -31,6 +31,9 @@ export type BlobBackendConfig =
       accessKey: string;
       secretKey: string;
       region: string;
+      prefix?: string;
+      forcePathStyle?: boolean;
+      requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
     };
 
 export interface NodeConfig {
@@ -169,7 +172,22 @@ export function loadNodeConfig(env: NodeEnvironment): NodeConfig {
     const accessKey = env[`${prefix}_ACCESS_KEY`];
     const secretKey = env[`${prefix}_SECRET_KEY`];
     if (!endpoint || !bucket || !accessKey || !secretKey) return null;
-    return { kind: "s3" as const, endpoint, bucket, accessKey, secretKey, region: env[`${prefix}_REGION`] ?? "us-east-1" };
+    const keyPrefix = env[`${prefix}_PREFIX`]?.trim();
+    if (keyPrefix && (keyPrefix.startsWith("/") || !keyPrefix.endsWith("/") || keyPrefix.split("/").includes(".."))) {
+      problems.push(`${prefix}_PREFIX must be a relative object-key prefix ending in /`);
+    }
+    const pathStyle = env[`${prefix}_FORCE_PATH_STYLE`];
+    if (pathStyle !== undefined && pathStyle !== "0" && pathStyle !== "1") problems.push(`${prefix}_FORCE_PATH_STYLE must be 0 or 1`);
+    const checksum = env[`${prefix}_REQUEST_CHECKSUM_CALCULATION`];
+    if (checksum !== undefined && checksum !== "WHEN_REQUIRED" && checksum !== "WHEN_SUPPORTED") {
+      problems.push(`${prefix}_REQUEST_CHECKSUM_CALCULATION must be WHEN_REQUIRED or WHEN_SUPPORTED`);
+    }
+    return {
+      kind: "s3" as const, endpoint, bucket, accessKey, secretKey, region: env[`${prefix}_REGION`] ?? "us-east-1",
+      ...(keyPrefix && !keyPrefix.startsWith("/") && keyPrefix.endsWith("/") && !keyPrefix.split("/").includes("..") ? { prefix: keyPrefix } : {}),
+      ...(pathStyle === undefined ? {} : { forcePathStyle: pathStyle === "1" }),
+      ...(checksum === "WHEN_REQUIRED" || checksum === "WHEN_SUPPORTED" ? { requestChecksumCalculation: checksum as "WHEN_REQUIRED" | "WHEN_SUPPORTED" } : {}),
+    };
   };
   const memoryS3 = s3("MEMORY_S3");
   const memory: NodeConfig["blobs"]["memory"] = memoryS3 === null

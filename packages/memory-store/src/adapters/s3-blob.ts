@@ -33,6 +33,7 @@ export interface S3BlobStoreOptions {
   /** Some endpoints (MinIO) require path-style addressing. Default true
    *  for safety; AWS S3 also accepts it. */
   forcePathStyle?: boolean;
+  requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
   /** Optional path prefix prepended to every key. Useful for sharing a
    *  bucket across stages (`prefix: "prod/"`). */
   prefix?: string;
@@ -105,6 +106,7 @@ export class S3BlobStore implements BlobStore {
           endpoint: this.opts.endpoint,
           region: this.opts.region ?? "us-east-1",
           forcePathStyle: this.opts.forcePathStyle ?? true,
+          ...(this.opts.requestChecksumCalculation ? { requestChecksumCalculation: this.opts.requestChecksumCalculation } : {}),
           credentials: {
             accessKeyId: this.opts.accessKeyId,
             secretAccessKey: this.opts.secretAccessKey,

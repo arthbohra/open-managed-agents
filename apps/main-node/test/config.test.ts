@@ -68,6 +68,19 @@ describe("loadNodeConfig", () => {
     expect(full.blobs.files).toEqual({ kind: "s3", endpoint: "http://s3", bucket: "files", accessKey: "ak2", secretKey: "sk2", region: "eu-west-1" });
   });
 
+  it("scopes S3 blob stores with a key prefix and virtual-host/checksum options", () => {
+    const config = loadNodeConfig({
+      ...minimal,
+      MEMORY_S3_ENDPOINT: "https://s3.example", MEMORY_S3_BUCKET: "shared", MEMORY_S3_ACCESS_KEY: "a", MEMORY_S3_SECRET_KEY: "s",
+      MEMORY_S3_PREFIX: "prod/openma/memory/", MEMORY_S3_FORCE_PATH_STYLE: "0", MEMORY_S3_REQUEST_CHECKSUM_CALCULATION: "WHEN_REQUIRED",
+      FILES_S3_ENDPOINT: "https://s3.example", FILES_S3_BUCKET: "shared", FILES_S3_ACCESS_KEY: "a", FILES_S3_SECRET_KEY: "s",
+      FILES_S3_PREFIX: "prod/openma/files/", FILES_S3_FORCE_PATH_STYLE: "0", FILES_S3_REQUEST_CHECKSUM_CALCULATION: "WHEN_REQUIRED",
+    });
+    expect(config.blobs.memory).toMatchObject({ kind: "s3", prefix: "prod/openma/memory/", forcePathStyle: false, requestChecksumCalculation: "WHEN_REQUIRED" });
+    expect(config.blobs.files).toMatchObject({ kind: "s3", prefix: "prod/openma/files/", forcePathStyle: false, requestChecksumCalculation: "WHEN_REQUIRED" });
+    expect(() => loadNodeConfig({ ...minimal, MEMORY_S3_ENDPOINT: "https://s3.example", MEMORY_S3_BUCKET: "shared", MEMORY_S3_ACCESS_KEY: "a", MEMORY_S3_SECRET_KEY: "s", MEMORY_S3_PREFIX: "/absolute" })).toThrow(/MEMORY_S3_PREFIX/);
+  });
+
   it("parses the string-encoded flags and numbers exactly as the assembly did", () => {
     const config = loadNodeConfig({
       ...minimal,

@@ -15,6 +15,9 @@ export interface S3Location {
   accessKey: string;
   secretKey: string;
   region: string;
+  prefix?: string;
+  forcePathStyle?: boolean;
+  requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
 }
 
 export interface MemoryBlobs {
@@ -48,6 +51,9 @@ export async function createMemoryBlobs(config: NodeConfig["blobs"]["memory"]): 
       accessKey: config.accessKey,
       secretKey: config.secretKey,
       region: config.region,
+      ...(config.prefix ? { prefix: config.prefix } : {}),
+      ...(config.forcePathStyle === undefined ? {} : { forcePathStyle: config.forcePathStyle }),
+      ...(config.requestChecksumCalculation ? { requestChecksumCalculation: config.requestChecksumCalculation } : {}),
       pollIntervalMs: config.pollIntervalMs ?? 30_000,
     };
     return {
@@ -57,6 +63,9 @@ export async function createMemoryBlobs(config: NodeConfig["blobs"]["memory"]): 
         accessKeyId: s3.accessKey,
         secretAccessKey: s3.secretKey,
         region: s3.region,
+        ...(s3.prefix ? { prefix: s3.prefix } : {}),
+        ...(s3.forcePathStyle === undefined ? {} : { forcePathStyle: s3.forcePathStyle }),
+        ...(s3.requestChecksumCalculation ? { requestChecksumCalculation: s3.requestChecksumCalculation } : {}),
       }),
       description: `s3 ${s3.endpoint}/${s3.bucket}`,
       s3,
@@ -78,6 +87,9 @@ export function createFilesBlobs(config: NodeConfig["blobs"]["files"]): FilesBlo
         accessKeyId: config.accessKey,
         secretAccessKey: config.secretKey,
         region: config.region,
+        ...(config.prefix ? { prefix: config.prefix } : {}),
+        ...(config.forcePathStyle === undefined ? {} : { forcePathStyle: config.forcePathStyle }),
+        ...(config.requestChecksumCalculation ? { requestChecksumCalculation: config.requestChecksumCalculation } : {}),
       }),
       description: `s3 ${config.endpoint}/${config.bucket}`,
     };

@@ -27,6 +27,7 @@ export interface S3BlobStoreOptions {
   secretAccessKey: string;
   region?: string;
   forcePathStyle?: boolean;
+  requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
   prefix?: string;
 }
 
@@ -87,6 +88,7 @@ export class S3BlobStore implements BlobStore {
           endpoint: this.opts.endpoint,
           region: this.opts.region ?? "us-east-1",
           forcePathStyle: this.opts.forcePathStyle ?? true,
+          ...(this.opts.requestChecksumCalculation ? { requestChecksumCalculation: this.opts.requestChecksumCalculation } : {}),
           credentials: {
             accessKeyId: this.opts.accessKeyId,
             secretAccessKey: this.opts.secretAccessKey,
