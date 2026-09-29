@@ -189,6 +189,9 @@ export class CloudflareSandbox
       credentials: fuse.credentials,
       prefix,
       readOnly: false,
+      // The agent must not read bucket-wide R2 keys from s3fs's password file.
+      // The SDK keeps real keys in the DO and enforces this mount's prefix.
+      credentialProxy: true,
     });
   }
 

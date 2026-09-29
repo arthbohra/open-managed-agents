@@ -290,6 +290,9 @@ describe("isolated Cloudflare managed runtime package", () => {
     const host = createCloudflareManagedRuntimeHost(env, { ownerId: "owner", createSandbox, leaseTtlMs: 1000, heartbeatIntervalMs: 200, runtimeCheckpoint, sessionInputs });
     expect(host).toMatchObject({ fences: expect.any(Object), orphans: expect.any(Object), host: expect.any(Object), orphanReconciler: expect.any(Object), sessionInputs });
     expect(createCloudflareManagedRuntimeHost(env, { ownerId: "owner-defaults", createSandbox })).toMatchObject({ host: expect.any(Object) });
+    expect(() => createCloudflareManagedRuntimeHost(env, {
+      ownerId: "owner-interval", createSandbox, checkpointIntervalMs: 0,
+    })).toThrow(/checkpointIntervalMs/);
 
     const client: Record<string, unknown> = { baseURL: "https://client" };
     client.withOptions = vi.fn(() => client);

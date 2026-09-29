@@ -773,6 +773,7 @@ describe("Sandbox lifecycle", () => {
       credentials: { accessKeyId: "access", secretAccessKey: "secret" },
       prefix: "/openma-workspaces/tenant-1/session-1/",
       readOnly: false,
+      credentialProxy: true,
     });
   });
 

@@ -75,6 +75,8 @@ export interface CloudflareManagedRuntimeHostOptions
   /** Stable identity of this SessionDO/worker instance; never a user token. */
   ownerId: string;
   heartbeatIntervalMs?: number;
+  /** Safe-point target for checkpoint_restore; mount strategy never snapshots. */
+  checkpointIntervalMs?: number;
   runtimeCheckpoint?: RuntimeCheckpointPort;
   sessionInputs?: SessionInputMaterializerPort;
 }
@@ -377,6 +379,7 @@ export function createCloudflareManagedRuntimeHost(
     ownerId: options.ownerId,
     leaseTtlMs,
     heartbeatIntervalMs: options.heartbeatIntervalMs ?? 30_000,
+    ...(options.checkpointIntervalMs === undefined ? {} : { checkpointIntervalMs: options.checkpointIntervalMs }),
     fences,
     sandbox: runtime.sandbox,
     workspace: runtime.workspace,
