@@ -29,6 +29,10 @@ export interface S3BlobStoreOptions {
   forcePathStyle?: boolean;
   requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
   prefix?: string;
+  /** How create-only (`ifNoneMatch: "*"`) PUTs are expressed. Aliyun OSS's S3
+   * layer rejects If-None-Match with NotImplemented but honours its native
+   * `x-oss-forbid-overwrite` header (409 FileAlreadyExists when present). */
+  conditionalCreate?: "if-none-match" | "oss-forbid-overwrite";
 }
 
 interface S3HeadOutput {
@@ -169,14 +173,17 @@ export class S3BlobStore implements BlobStore {
     if (http?.contentLanguage) putInput.ContentLanguage = http.contentLanguage;
     if (http?.cacheControl) putInput.CacheControl = http.cacheControl;
     if (opts?.customMetadata) putInput.Metadata = opts.customMetadata;
-    if (opts?.precondition?.type === "ifNoneMatch") putInput.IfNoneMatch = "*";
+    const ossCreateOnly = opts?.precondition?.type === "ifNoneMatch" && this.opts.conditionalCreate === "oss-forbid-overwrite";
+    if (opts?.precondition?.type === "ifNoneMatch" && !ossCreateOnly) putInput.IfNoneMatch = "*";
     else if (opts?.precondition?.type === "ifMatch") putInput.IfMatch = opts.precondition.etag;
 
+    const command = new PutObjectCommand(putInput);
+    if (ossCreateOnly) addOssForbidOverwrite(command);
     let put: S3PutOutput;
     try {
-      put = await client.send(new PutObjectCommand(putInput));
+      put = await client.send(command);
     } catch (err) {
-      if (isPreconditionFailed(err)) return null;
+      if (isPreconditionFailed(err) || (ossCreateOnly && isOssAlreadyExists(err))) return null;
       throw err;
     }
     return {
@@ -240,6 +247,22 @@ function isNotFound(err: unknown): boolean {
     e?.name === "NotFound" ||
     e?.$metadata?.httpStatusCode === 404
   );
+}
+
+/** Added in the build step, before SigV4 signing, so the header is signed. */
+function addOssForbidOverwrite(command: unknown): void {
+  const stack = (command as { middlewareStack?: { add(mw: unknown, options: unknown): void } }).middlewareStack;
+  if (!stack) throw new Error("S3 client does not expose a middleware stack for OSS create-only writes");
+  stack.add((next: (args: unknown) => Promise<unknown>) => async (args: unknown) => {
+    const request = (args as { request?: { headers?: Record<string, string> } }).request;
+    if (request?.headers) request.headers["x-oss-forbid-overwrite"] = "true";
+    return next(args);
+  }, { step: "build", name: "openmaOssForbidOverwrite" });
+}
+
+function isOssAlreadyExists(err: unknown): boolean {
+  const e = err as { name?: string; Code?: string; $metadata?: { httpStatusCode?: number } } | null;
+  return e?.name === "FileAlreadyExists" || e?.Code === "FileAlreadyExists" || e?.$metadata?.httpStatusCode === 409;
 }
 
 function isPreconditionFailed(err: unknown): boolean {

@@ -34,6 +34,7 @@ export type BlobBackendConfig =
       prefix?: string;
       forcePathStyle?: boolean;
       requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
+      conditionalCreate?: "if-none-match" | "oss-forbid-overwrite";
     };
 
 export interface NodeConfig {
@@ -183,6 +184,10 @@ export function loadNodeConfig(env: NodeEnvironment): NodeConfig {
     }
     const pathStyle = env[`${prefix}_FORCE_PATH_STYLE`];
     if (pathStyle !== undefined && pathStyle !== "0" && pathStyle !== "1") problems.push(`${prefix}_FORCE_PATH_STYLE must be 0 or 1`);
+    const conditionalCreate = env[`${prefix}_CONDITIONAL_CREATE`];
+    if (conditionalCreate !== undefined && conditionalCreate !== "if-none-match" && conditionalCreate !== "oss-forbid-overwrite") {
+      problems.push(`${prefix}_CONDITIONAL_CREATE must be if-none-match or oss-forbid-overwrite`);
+    }
     const checksum = env[`${prefix}_REQUEST_CHECKSUM_CALCULATION`];
     if (checksum !== undefined && checksum !== "WHEN_REQUIRED" && checksum !== "WHEN_SUPPORTED") {
       problems.push(`${prefix}_REQUEST_CHECKSUM_CALCULATION must be WHEN_REQUIRED or WHEN_SUPPORTED`);
@@ -192,6 +197,7 @@ export function loadNodeConfig(env: NodeEnvironment): NodeConfig {
       ...(keyPrefix && !keyPrefix.startsWith("/") && keyPrefix.endsWith("/") && !keyPrefix.split("/").includes("..") ? { prefix: keyPrefix } : {}),
       ...(pathStyle === undefined ? {} : { forcePathStyle: pathStyle === "1" }),
       ...(checksum === "WHEN_REQUIRED" || checksum === "WHEN_SUPPORTED" ? { requestChecksumCalculation: checksum as "WHEN_REQUIRED" | "WHEN_SUPPORTED" } : {}),
+      ...(conditionalCreate === "oss-forbid-overwrite" ? { conditionalCreate: "oss-forbid-overwrite" as const } : {}),
     };
   };
   const memoryS3 = s3("MEMORY_S3");

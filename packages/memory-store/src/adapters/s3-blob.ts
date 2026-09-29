@@ -37,6 +37,8 @@ export interface S3BlobStoreOptions {
   /** Optional path prefix prepended to every key. Useful for sharing a
    *  bucket across stages (`prefix: "prod/"`). */
   prefix?: string;
+  /** Aliyun OSS rejects If-None-Match; use its x-oss-forbid-overwrite. */
+  conditionalCreate?: "if-none-match" | "oss-forbid-overwrite";
 }
 
 interface S3SidecarMeta {
@@ -207,7 +209,8 @@ export class S3BlobStore implements BlobStore {
       Body: body,
       ContentType: "text/plain; charset=utf-8",
     };
-    if (precondition?.type === "ifNoneMatch") putInput.IfNoneMatch = "*";
+    const ossCreateOnly = precondition?.type === "ifNoneMatch" && this.opts.conditionalCreate === "oss-forbid-overwrite";
+    if (precondition?.type === "ifNoneMatch" && !ossCreateOnly) putInput.IfNoneMatch = "*";
     else if (precondition?.type === "ifMatch") putInput.IfMatch = precondition.etag;
     if (opts?.actorMetadata) {
       putInput.Metadata = {
@@ -218,10 +221,21 @@ export class S3BlobStore implements BlobStore {
 
     let put: S3PutOutput;
     try {
-      put = await client.send(new PutObjectCommand(putInput));
+      const command = new PutObjectCommand(putInput);
+      if (ossCreateOnly) {
+        (command as unknown as { middlewareStack: { add(mw: unknown, o: unknown): void } }).middlewareStack.add(
+          (next: (args: unknown) => Promise<unknown>) => async (args: unknown) => {
+            const request = (args as { request?: { headers?: Record<string, string> } }).request;
+            if (request?.headers) request.headers["x-oss-forbid-overwrite"] = "true";
+            return next(args);
+          }, { step: "build", name: "openmaOssForbidOverwrite" });
+      }
+      put = await client.send(command);
     } catch (err) {
       // 412 Precondition Failed → contract says return null, not throw.
       if (isPreconditionFailed(err)) return null;
+      if (ossCreateOnly && ((err as { name?: string })?.name === "FileAlreadyExists"
+        || (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 409)) return null;
       throw err;
     }
     const etag = stripQuotes(put.ETag ?? "");

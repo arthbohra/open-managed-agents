@@ -82,6 +82,18 @@ describe("loadNodeConfig", () => {
     expect(() => loadNodeConfig({ ...minimal, MEMORY_S3_ENDPOINT: "https://s3.example", MEMORY_S3_BUCKET: "shared", MEMORY_S3_ACCESS_KEY: "a", MEMORY_S3_SECRET_KEY: "s", MEMORY_S3_PREFIX: "/absolute" })).toThrow(/MEMORY_S3_PREFIX/);
   });
 
+  it("selects Aliyun OSS create-only semantics for S3 blob stores", () => {
+    const s3 = (prefix: string) => ({ [`${prefix}_ENDPOINT`]: "https://oss.example", [`${prefix}_BUCKET`]: "b",
+      [`${prefix}_ACCESS_KEY`]: "a", [`${prefix}_SECRET_KEY`]: "s", [`${prefix}_CONDITIONAL_CREATE`]: "oss-forbid-overwrite" });
+    const config = loadNodeConfig({ ...minimal, ...s3("MEMORY_S3"), ...s3("FILES_S3") });
+    expect(config.blobs.files).toMatchObject({ conditionalCreate: "oss-forbid-overwrite" });
+    expect(config.blobs.memory).toMatchObject({ conditionalCreate: "oss-forbid-overwrite" });
+    expect(loadNodeConfig({ ...minimal, ...s3("FILES_S3"), FILES_S3_CONDITIONAL_CREATE: undefined as unknown as string }).blobs.files)
+      .not.toHaveProperty("conditionalCreate");
+    expect(() => loadNodeConfig({ ...minimal, ...s3("FILES_S3"), FILES_S3_CONDITIONAL_CREATE: "sometimes" }))
+      .toThrow(/FILES_S3_CONDITIONAL_CREATE/);
+  });
+
   it("requires shared S3 blobs when checkpoint_restore is selected and parses its safe-point interval", () => {
     const workspace = { OMA_WORKSPACE_STRATEGY: "checkpoint_restore" };
     expect(() => loadNodeConfig({ ...minimal, ...workspace })).toThrow(/FILES_S3.*checkpoint_restore/i);

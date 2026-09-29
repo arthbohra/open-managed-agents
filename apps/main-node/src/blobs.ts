@@ -18,6 +18,7 @@ export interface S3Location {
   prefix?: string;
   forcePathStyle?: boolean;
   requestChecksumCalculation?: "WHEN_REQUIRED" | "WHEN_SUPPORTED";
+  conditionalCreate?: "if-none-match" | "oss-forbid-overwrite";
 }
 
 export interface MemoryBlobs {
@@ -54,6 +55,7 @@ export async function createMemoryBlobs(config: NodeConfig["blobs"]["memory"]): 
       ...(config.prefix ? { prefix: config.prefix } : {}),
       ...(config.forcePathStyle === undefined ? {} : { forcePathStyle: config.forcePathStyle }),
       ...(config.requestChecksumCalculation ? { requestChecksumCalculation: config.requestChecksumCalculation } : {}),
+      ...(config.conditionalCreate ? { conditionalCreate: config.conditionalCreate } : {}),
       pollIntervalMs: config.pollIntervalMs ?? 30_000,
     };
     return {
@@ -66,6 +68,7 @@ export async function createMemoryBlobs(config: NodeConfig["blobs"]["memory"]): 
         ...(s3.prefix ? { prefix: s3.prefix } : {}),
         ...(s3.forcePathStyle === undefined ? {} : { forcePathStyle: s3.forcePathStyle }),
         ...(s3.requestChecksumCalculation ? { requestChecksumCalculation: s3.requestChecksumCalculation } : {}),
+        ...(s3.conditionalCreate ? { conditionalCreate: s3.conditionalCreate } : {}),
       }),
       description: `s3 ${s3.endpoint}/${s3.bucket}`,
       s3,
@@ -90,6 +93,7 @@ export function createFilesBlobs(config: NodeConfig["blobs"]["files"]): FilesBlo
         ...(config.prefix ? { prefix: config.prefix } : {}),
         ...(config.forcePathStyle === undefined ? {} : { forcePathStyle: config.forcePathStyle }),
         ...(config.requestChecksumCalculation ? { requestChecksumCalculation: config.requestChecksumCalculation } : {}),
+        ...(config.conditionalCreate ? { conditionalCreate: config.conditionalCreate } : {}),
       }),
       description: `s3 ${config.endpoint}/${config.bucket}`,
     };
