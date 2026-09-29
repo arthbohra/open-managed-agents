@@ -67,6 +67,16 @@ describe("shared official Session outputs", () => {
     expect(await f.reader.read("tenant_1", "session_1", "nested/data.txt")).toBeNull();
   });
 
+  it("never touches the node-local outputs root in shared mode (it may be read-only in the image)", async () => {
+    const f = await fixture();
+    const collector = new NodeManagedSessionOutputCollector({
+      outputsRoot: "/proc/openma-read-only-outputs", isFenceActive: async () => true, shared: f.writer,
+    });
+    await collector.synchronize({ workspaceId: "tenant_1", sessionId: "session_1", sandbox: sandbox({ "report.txt": "shared" }), executionFence: f.fence });
+    const value = await f.reader.read("tenant_1", "session_1", "report.txt");
+    expect(await text(value!.body as ReadableStream<Uint8Array>)).toBe("shared");
+  });
+
   it("uploads each output before reading the next one instead of retaining the whole 10 GiB set in Node memory", async () => {
     const stored = new InMemoryBlobStore();
     let firstUploaded = false;

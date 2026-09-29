@@ -121,6 +121,49 @@ export class NodeManagedSessionOutputCollector {
 
     assertSafeId("workspace id", input.workspaceId);
     assertSafeId("session id", input.sessionId);
+    // Frame stdout: VM adapters may append diagnostic stderr to a valid
+    // command's combined output (for example a seccomp warning). The
+    // manifest is still unambiguous, and find failure remains fatal.
+    const manifestFile = `/tmp/openma-output-list-${randomUUID()}`;
+    const encoded = await input.sandbox.exec(
+      `if test -d ${OUTPUTS_DIR} && find ${OUTPUTS_DIR} -type f -print0 > '${manifestFile}'; then ` +
+      `printf '${MANIFEST_BEGIN}'; base64 < '${manifestFile}' | tr -d '\\n'; ` +
+      `printf '${MANIFEST_END}'; rm -f '${manifestFile}'; ` +
+      `else rm -f '${manifestFile}'; exit 2; fi`,
+    );
+    const absolutePaths = decodeOutputPaths(encoded);
+    if (absolutePaths.length > MAX_OUTPUT_FILES) {
+      throw new Error(`Session output file limit exceeded (${MAX_OUTPUT_FILES})`);
+    }
+
+    const sharedOutputs = this.dependencies.shared;
+    let totalBytes = 0;
+    const seen = new Set<string>();
+    const readFiles = async function* (): AsyncGenerator<readonly [string, Uint8Array]> {
+      for (const absolutePath of absolutePaths) {
+        const logicalPath = logicalOutputPath(absolutePath);
+        if (seen.has(logicalPath)) throw new Error(`Duplicate Session output path: ${logicalPath}`);
+        seen.add(logicalPath);
+        const bytes = await input.sandbox.readFileBytes!(absolutePath);
+        if (bytes.byteLength > MAX_SESSION_OUTPUT_FILE_BYTES && sharedOutputs !== undefined) {
+          throw new Error("Session output file exceeds shared restore size limit");
+        }
+        totalBytes += bytes.byteLength;
+        if (totalBytes > MAX_OUTPUT_BYTES) throw new Error(`Session output byte limit exceeded (${MAX_OUTPUT_BYTES})`);
+        yield [logicalPath, bytes] as const;
+      }
+    };
+    if (sharedOutputs !== undefined) {
+      // Shared mode never touches the node-local outputs root: it can be
+      // read-only in the image and is not visible to other replicas anyway.
+      await sharedOutputs.publish({
+        workspaceId: input.workspaceId, sessionId: input.sessionId,
+        fence: input.executionFence, files: readFiles(),
+        ...(input.runtimeGeneration === undefined ? {} : { runtimeGeneration: input.runtimeGeneration }),
+      });
+      return;
+    }
+
     const workspaceRoot = join(this.dependencies.outputsRoot, input.workspaceId);
     await mkdir(workspaceRoot, { recursive: true });
     const staging = await mkdtemp(join(workspaceRoot, `.${input.sessionId}.collect-`));
@@ -131,46 +174,6 @@ export class NodeManagedSessionOutputCollector {
     );
 
     try {
-      // Frame stdout: VM adapters may append diagnostic stderr to a valid
-      // command's combined output (for example a seccomp warning). The
-      // manifest is still unambiguous, and find failure remains fatal.
-      const manifestFile = `/tmp/openma-output-list-${randomUUID()}`;
-      const encoded = await input.sandbox.exec(
-        `if test -d ${OUTPUTS_DIR} && find ${OUTPUTS_DIR} -type f -print0 > '${manifestFile}'; then ` +
-        `printf '${MANIFEST_BEGIN}'; base64 < '${manifestFile}' | tr -d '\\n'; ` +
-        `printf '${MANIFEST_END}'; rm -f '${manifestFile}'; ` +
-        `else rm -f '${manifestFile}'; exit 2; fi`,
-      );
-      const absolutePaths = decodeOutputPaths(encoded);
-      if (absolutePaths.length > MAX_OUTPUT_FILES) {
-        throw new Error(`Session output file limit exceeded (${MAX_OUTPUT_FILES})`);
-      }
-
-      const sharedOutputs = this.dependencies.shared;
-      let totalBytes = 0;
-      const seen = new Set<string>();
-      const readFiles = async function* (): AsyncGenerator<readonly [string, Uint8Array]> {
-        for (const absolutePath of absolutePaths) {
-          const logicalPath = logicalOutputPath(absolutePath);
-          if (seen.has(logicalPath)) throw new Error(`Duplicate Session output path: ${logicalPath}`);
-          seen.add(logicalPath);
-          const bytes = await input.sandbox.readFileBytes!(absolutePath);
-          if (bytes.byteLength > MAX_SESSION_OUTPUT_FILE_BYTES && sharedOutputs !== undefined) {
-            throw new Error("Session output file exceeds shared restore size limit");
-          }
-          totalBytes += bytes.byteLength;
-          if (totalBytes > MAX_OUTPUT_BYTES) throw new Error(`Session output byte limit exceeded (${MAX_OUTPUT_BYTES})`);
-          yield [logicalPath, bytes] as const;
-        }
-      };
-      if (this.dependencies.shared !== undefined) {
-        await this.dependencies.shared.publish({
-          workspaceId: input.workspaceId, sessionId: input.sessionId,
-          fence: input.executionFence, files: readFiles(),
-          ...(input.runtimeGeneration === undefined ? {} : { runtimeGeneration: input.runtimeGeneration }),
-        });
-        return;
-      }
       for await (const [logicalPath, bytes] of readFiles()) {
         const destination = join(staging, logicalPath);
         assertInside(staging, destination);
