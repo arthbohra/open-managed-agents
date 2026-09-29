@@ -98,6 +98,7 @@
     "@open-managed-agents/sessions-store": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/slack": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vault-forward": "workspace:*",
     "@open-managed-agents/vault-store-sql": "workspace:*",

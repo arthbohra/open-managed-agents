@@ -53,7 +53,7 @@ import { SqlTunnelStore } from "@open-managed-agents/tunnel-store-sql";
 import { SqlUserProfileStore } from "@open-managed-agents/user-profile-store-sql";
 import { SqlEnvironmentWorkStore, type EnvironmentWorkSecretCipher } from "@open-managed-agents/environment-work-store-sql";
 import { SqlDeploymentAgentSource, SqlDeploymentVaultSource, SqlEnvironmentPersistence, SqlFileMetadataPersistence, SqlMemoryStoreSource, SqlManagedSessionsComposition, SqlPersistedSessionEventStream, SqlReplicatedSessionEventStream, SqlSessionEnvironmentSource, SqlSessionSource, SqlSessionRuntimeProjectionPersistence } from "@open-managed-agents/managed-agents-adapters-sql";
-import { createSqlSessionRuntimeReaders, SqlSessionExecutionCoordinator } from "@open-managed-agents/session-runtime-sql";
+import { createSqlSessionRuntimeReaders, ensureSessionExecutionClaimLockSchema, SqlSessionExecutionCoordinator } from "@open-managed-agents/session-runtime-sql";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
 import { AnthropicMessagesDreamCurator, ApplicationDreamMemoryWorkspace, ModelCardCatalogSource, CronDeploymentSchedulePlanner, EnvironmentAwareSessionEventDispatchRouter, EnvironmentAwareSessionEventStreamRouter, EnvironmentAwareSessionLifecycleRouter, TimerEnvironmentWorkAvailabilityWaiter, IndeterminateCredentialValidationProbe, inProcessDreamExecutionSchedulerModule, LocalTunnelProvisioner, SealedEnvironmentWorkSessionCredentialIssuer, StandardWebhookEnvironmentWorkWakeup, DeduplicatingDreamCurator, WebCryptoTunnelCertificateAuthority, WebCryptoTunnelTokenManager, WebCryptoMemoryContentDescriptor, ZipSkillPackageCompiler, synchronizeManagedSessionMemoryWorkspaces } from "@open-managed-agents/managed-agents-adapters-runtime";
 
@@ -62,6 +62,7 @@ import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapte
 import { resolveFeishuAgentTools } from "../lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "../lib/node-outputs-adapter.js";
 import { NodeManagedSessionOutputCollector } from "../lib/node-managed-session-outputs.js";
+import { NodeManagedWorkspaceCheckpoints } from "../lib/node-managed-workspace-checkpoints.js";
 import { nodeSessionLifecycle } from "../lib/node-session-lifecycle.js";
 import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 
@@ -275,7 +276,12 @@ export async function createManagedNodeRuntime(
     },
   });
 
-  const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql);
+  if (config.workspace.strategy === "checkpoint_restore") {
+    await ensureSessionExecutionClaimLockSchema(sql);
+  }
+  const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql, {
+    serializeSessionClaims: config.workspace.strategy === "checkpoint_restore",
+  });
 
   async function isManagedSessionExecutionFenceActive(fence: {
     workspaceId: string;
@@ -303,8 +309,15 @@ export async function createManagedNodeRuntime(
     outputsRoot,
     isFenceActive: isManagedSessionExecutionFenceActive,
   });
+  const workspaceCheckpoints = config.workspace.strategy === "checkpoint_restore"
+    ? new NodeManagedWorkspaceCheckpoints({
+        sql, blobs: filesBlob, intervalMs: config.workspace.checkpointIntervalMs,
+      })
+    : undefined;
+  await workspaceCheckpoints?.ensureSchema();
 
   const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
+    ...(workspaceCheckpoints === undefined ? {} : { workspaceCheckpoints }),
     subagentThreads: new SqlSessionThreadStore(sql),
     subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
     resolveSubagentSession: async ({ workspaceId, session, request }) => {

@@ -855,6 +855,9 @@ importers:
       '@open-managed-agents/rate-limit':
         specifier: workspace:*
         version: link:../../packages/rate-limit
+      '@open-managed-agents/runtime-resource-contract':
+        specifier: workspace:*
+        version: link:../../packages/runtime-resource-contract
       '@open-managed-agents/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox

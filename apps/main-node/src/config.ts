@@ -66,6 +66,11 @@ export interface NodeConfig {
   };
   dreamCurator: "model" | "dedup";
   execution: { ownerId: string; concurrency: number };
+  workspace: {
+    strategy: "ephemeral" | "checkpoint_restore";
+    /** Target between safe turn checkpoints; no fixed wall-clock RPO. */
+    checkpointIntervalMs: number;
+  };
   managedWebhooks: {
     url: string | undefined;
     signingKey: string | undefined;
@@ -194,6 +199,14 @@ export function loadNodeConfig(env: NodeEnvironment): NodeConfig {
     ? { kind: "localfs", dir: env.MEMORY_BLOB_DIR ?? "./data/memory-blobs" }
     : { ...memoryS3, pollIntervalMs: Math.max(5_000, integer("MEMORY_S3_POLL_INTERVAL_SEC", 30) * 1000) };
   const files: BlobBackendConfig = s3("FILES_S3") ?? { kind: "localfs", dir: env.FILES_BLOB_DIR ?? "./data/files-blobs" };
+  const workspaceStrategy = env.OMA_WORKSPACE_STRATEGY ?? "ephemeral";
+  if (workspaceStrategy !== "ephemeral" && workspaceStrategy !== "checkpoint_restore") {
+    problems.push("OMA_WORKSPACE_STRATEGY must be ephemeral or checkpoint_restore");
+  }
+  if (workspaceStrategy === "checkpoint_restore" && files.kind !== "s3") {
+    problems.push("FILES_S3_* shared storage is required for checkpoint_restore");
+  }
+  const checkpointIntervalMs = integer("OMA_WORKSPACE_CHECKPOINT_INTERVAL_SEC", 60, { min: 1 }) * 1000;
 
   const memoryQueueRaw = env.MEMORY_QUEUE ?? "auto";
   const memoryQueue: NodeConfig["memoryQueue"] = memoryQueueRaw === "disabled" ? "disabled" : "auto";
@@ -242,6 +255,10 @@ export function loadNodeConfig(env: NodeEnvironment): NodeConfig {
     execution: {
       ownerId: env.OMA_SESSION_EXECUTION_OWNER_ID ?? `node:${process.pid}:${nanoid()}`,
       concurrency: integer("OMA_SESSION_EXECUTION_CONCURRENCY", 8, { min: 1 }),
+    },
+    workspace: {
+      strategy: workspaceStrategy === "checkpoint_restore" ? "checkpoint_restore" : "ephemeral",
+      checkpointIntervalMs,
     },
     managedWebhooks: {
       url: env.OMA_MANAGED_AGENTS_WEBHOOK_URL,

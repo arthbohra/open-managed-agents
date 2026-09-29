@@ -41,10 +41,21 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS managed_session_executions_session_idx
     ON managed_session_executions
       (workspace_id, session_id, lane_id, admitted_at_ms, id)`,
+  `CREATE TABLE IF NOT EXISTS managed_session_claim_locks (
+    workspace_id VARCHAR(191) NOT NULL, session_id VARCHAR(191) NOT NULL,
+    claim_token VARCHAR(191) NOT NULL,
+    PRIMARY KEY (workspace_id, session_id)
+  )`,
 ] as const;
 
 export const sessionExecutionCoordinatorSqlSchema =
   `${schemaStatements.join(";\n")};`;
+
+/** Node migrations already created the execution table. This additive lock
+ * table is needed only when checkpoint_restore selects cross-lane serial mode. */
+export async function ensureSessionExecutionClaimLockSchema(sql: SqlClient): Promise<void> {
+  await sql.exec(schemaStatements[3]);
+}
 
 export async function ensureSessionExecutionCoordinatorSchema(
   sql: SqlClient,
@@ -228,10 +239,15 @@ function validateTtl(ttlMs: number): void {
   }
 }
 
+export interface SqlSessionExecutionStoreOptions {
+  /** Only checkpoint_restore enables this: all lanes of a Session share /workspace. */
+  serializeSessionClaims?: boolean;
+}
+
 export class SqlSessionExecutionStore
   implements SessionExecutionStorePort
 {
-  constructor(private readonly sql: SqlClient) {}
+  constructor(private readonly sql: SqlClient, private readonly options: SqlSessionExecutionStoreOptions = {}) {}
 
   async admit(
     input: AdmitSessionExecution,
@@ -294,7 +310,48 @@ export class SqlSessionExecutionStore
     validateTtl(input.leaseTtlMs);
     const claimedAt = timestamp(input.claimedAt, "claim");
     await this.terminalizeExpired(claimedAt);
-    const row = await this.sql.prepare(`
+    const serial = this.options.serializeSessionClaims === true;
+    const claimToken = crypto.randomUUID();
+    // The lock row is shared by every lane of a Session. The transaction's
+    // write lock serializes claims on distinct execution rows across replicas;
+    // a read-only NOT EXISTS check alone permits PostgreSQL write skew.
+    const sessionLock = this.sql.prepare(`
+      INSERT INTO managed_session_claim_locks (workspace_id, session_id, claim_token)
+      SELECT candidate.workspace_id, candidate.session_id, ?
+        FROM managed_session_executions AS candidate
+       WHERE (? IS NULL OR candidate.workspace_id = ?)
+         AND (? IS NULL OR candidate.session_id = ?)
+         AND (? IS NULL OR candidate.lane_id = ?)
+         AND (candidate.state = 'queued' OR (candidate.state = 'running'
+           AND candidate.lease_expires_at_ms <= ? AND candidate.owner_id <> ?))
+         AND candidate.attempt_count < candidate.max_attempts
+         AND candidate.deadline_at_ms > ?
+         AND NOT EXISTS (
+           SELECT 1 FROM managed_session_executions AS earlier
+            WHERE earlier.workspace_id = candidate.workspace_id
+              AND earlier.session_id = candidate.session_id
+              AND earlier.lane_id = candidate.lane_id
+              AND earlier.state IN ('queued', 'running')
+              AND (earlier.admitted_at_ms < candidate.admitted_at_ms
+                OR (earlier.admitted_at_ms = candidate.admitted_at_ms AND earlier.id < candidate.id))
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM managed_session_executions AS active
+            WHERE active.workspace_id = candidate.workspace_id
+              AND active.session_id = candidate.session_id
+              AND active.id <> candidate.id AND active.state = 'running'
+              AND active.lease_expires_at_ms > ?
+         )
+       ORDER BY candidate.admitted_at_ms, candidate.id LIMIT 1
+       ON CONFLICT (workspace_id, session_id) DO UPDATE SET claim_token = excluded.claim_token
+    `).bind(
+      claimToken,
+      input.workspaceId ?? null, input.workspaceId ?? null,
+      input.sessionId ?? null, input.sessionId ?? null,
+      input.laneId ?? null, input.laneId ?? null,
+      claimedAt, input.ownerId, claimedAt, claimedAt,
+    );
+    const claimStatement = this.sql.prepare(`
       UPDATE managed_session_executions
        SET state = 'running', attempt_id = ?, owner_id = ?,
              generation = generation + 1, attempt_count = attempt_count + 1,
@@ -318,6 +375,17 @@ export class SqlSessionExecutionStore
           )
             AND candidate.attempt_count < candidate.max_attempts
             AND candidate.deadline_at_ms > ?
+            ${serial ? `AND EXISTS (
+              SELECT 1 FROM managed_session_claim_locks AS lock
+               WHERE lock.workspace_id = candidate.workspace_id
+                 AND lock.session_id = candidate.session_id AND lock.claim_token = ?
+            ) AND NOT EXISTS (
+              SELECT 1 FROM managed_session_executions AS active
+               WHERE active.workspace_id = candidate.workspace_id
+                 AND active.session_id = candidate.session_id
+                 AND active.id <> candidate.id AND active.state = 'running'
+                 AND active.lease_expires_at_ms > ?
+            )` : ""}
             AND NOT EXISTS (
               SELECT 1
                 FROM managed_session_executions AS earlier
@@ -348,6 +416,12 @@ export class SqlSessionExecutionStore
          )
          AND attempt_count < max_attempts
          AND deadline_at_ms > ?
+         ${serial ? `AND EXISTS (
+           SELECT 1 FROM managed_session_claim_locks AS lock
+            WHERE lock.workspace_id = managed_session_executions.workspace_id
+              AND lock.session_id = managed_session_executions.session_id
+              AND lock.claim_token = ?
+         )` : ""}
       RETURNING ${columns()}
     `).bind(
       input.attemptId,
@@ -364,6 +438,7 @@ export class SqlSessionExecutionStore
       claimedAt,
       input.ownerId,
       claimedAt,
+      ...(serial ? [claimToken, claimedAt] : []),
       input.workspaceId ?? null,
       input.workspaceId ?? null,
       input.sessionId ?? null,
@@ -373,7 +448,11 @@ export class SqlSessionExecutionStore
       claimedAt,
       input.ownerId,
       claimedAt,
-    ).first<ExecutionRow>();
+      ...(serial ? [claimToken] : []),
+    );
+    const row = serial
+      ? (await this.sql.batch<ExecutionRow>([sessionLock, claimStatement]))[1]?.results?.[0] ?? null
+      : await claimStatement.first<ExecutionRow>();
     if (row === null) return { type: "empty" };
     return {
       type: "claimed",
