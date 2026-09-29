@@ -23,14 +23,16 @@ async function sandbox(): Promise<SandboxExecutor> {
   await mkdir(join(root, "workspace"));
   await mkdir(join(root, "tmp"));
   await mkdir(join(root, "var-tmp"));
-  const path = (name: string) => name.replace(/^\/workspace\b/, join(root, "workspace"))
-    .replace(/^\/var\/tmp\b/, join(root, "var-tmp"))
-    .replace(/^\/tmp\b/, join(root, "tmp"));
+  // One pass: on Linux tmpdir() is /tmp, so chained replaces would rewrite
+  // the already-rewritten root a second time.
+  const dirs: Record<string, string> = { "/workspace": "workspace", "/var/tmp": "var-tmp", "/tmp": "tmp" };
+  const rewrite = (text: string, anchored: boolean) => text.replace(
+    anchored ? /^(\/workspace|\/var\/tmp|\/tmp)\b/ : /(\/workspace|\/var\/tmp|\/tmp)\b/g,
+    (dir) => join(root, dirs[dir]!));
+  const path = (name: string) => rewrite(name, true);
   return {
     async exec(command) {
-      const cmd = command.replace(/\/workspace\b/g, join(root, "workspace"))
-        .replace(/\/var\/tmp\b/g, join(root, "var-tmp"))
-        .replace(/\/tmp\b/g, join(root, "tmp"));
+      const cmd = rewrite(command, false);
       const result = spawnSync("/bin/sh", ["-c", cmd], { encoding: "utf8" });
       return result.status === 0 ? result.stdout : `${result.stderr}[exit ${result.status}]`;
     },

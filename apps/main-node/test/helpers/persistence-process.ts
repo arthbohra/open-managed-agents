@@ -20,14 +20,15 @@ type Config = {
 const config = JSON.parse(process.env.OPENMA_TEST_ACTOR_INPUT ?? "null") as Config;
 if (!config?.databaseUrl || !config.root) throw new Error("Missing test actor configuration");
 const root = config.root;
-const path = (name: string) => name.replace(/^\/workspace\b/u, join(root, "workspace"))
-  .replace(/^\/var\/tmp\b/u, join(root, "var-tmp"))
-  .replace(/^\/tmp\b/u, join(root, "tmp"));
+// One pass: on Linux the scratch root itself lives under /tmp.
+const dirs: Record<string, string> = { "/workspace": "workspace", "/var/tmp": "var-tmp", "/tmp": "tmp" };
+const rewrite = (text: string, anchored: boolean) => text.replace(
+  anchored ? /^(\/workspace|\/var\/tmp|\/tmp)\b/u : /(\/workspace|\/var\/tmp|\/tmp)\b/gu,
+  (dir) => join(root, dirs[dir]!));
+const path = (name: string) => rewrite(name, true);
 const sandbox: SandboxExecutor = {
   async exec(command) {
-    const rewritten = command.replace(/\/workspace\b/gu, join(root, "workspace"))
-      .replace(/\/var\/tmp\b/gu, join(root, "var-tmp"))
-      .replace(/\/tmp\b/gu, join(root, "tmp"));
+    const rewritten = rewrite(command, false);
     const result = spawnSync("/bin/sh", ["-c", rewritten], { encoding: "utf8", timeout: 120_000 });
     return result.status === 0 ? result.stdout : `${result.stderr}[exit exit=${result.status}]`;
   },
