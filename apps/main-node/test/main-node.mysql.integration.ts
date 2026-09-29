@@ -155,7 +155,7 @@ describe.sequential("main-node MySQL composition root", () => {
     const workspaceId = `workspace_${randomUUID()}`;
     const sessionId = `session_${randomUUID()}`;
     try {
-      await ensureSessionExecutionClaimLockSchema(firstSql);
+      await ensureSessionExecutionClaimLockSchema(firstSql, "mysql");
       const checkpoints = new NodeManagedWorkspaceCheckpoints({ sql: firstSql, blobs: new InMemoryBlobStore(), intervalMs: 60_000 });
       await checkpoints.ensureSchema();
       const first = new SqlSessionExecutionCoordinator(firstSql, { serializeSessionClaims: true });

@@ -60,7 +60,6 @@ import { AnthropicMessagesDreamCurator, ApplicationDreamMemoryWorkspace, ModelCa
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 
 import { resolveFeishuAgentTools } from "../lib/feishu-agent-tools.js";
-import { nodeOutputsAdapter } from "../lib/node-outputs-adapter.js";
 import { NodeManagedSessionOutputCollector } from "../lib/node-managed-session-outputs.js";
 import { NodeManagedWorkspaceCheckpoints } from "../lib/node-managed-workspace-checkpoints.js";
 import { nodeSessionLifecycle } from "../lib/node-session-lifecycle.js";
@@ -107,6 +106,8 @@ export async function createManagedNodeRuntime(
     modelCardsService,
     memoryBlobs,
     outputsRoot,
+    sessionOutputs,
+    sharedSessionOutputs,
     filesBlob,
     buildSandbox,
     resolveNodeModelCreds,
@@ -277,7 +278,7 @@ export async function createManagedNodeRuntime(
   });
 
   if (config.workspace.strategy === "checkpoint_restore") {
-    await ensureSessionExecutionClaimLockSchema(sql);
+    await ensureSessionExecutionClaimLockSchema(sql, foundation.dialect);
   }
   const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql, {
     serializeSessionClaims: config.workspace.strategy === "checkpoint_restore",
@@ -308,6 +309,7 @@ export async function createManagedNodeRuntime(
   const managedSessionOutputCollector = new NodeManagedSessionOutputCollector({
     outputsRoot,
     isFenceActive: isManagedSessionExecutionFenceActive,
+    ...(sharedSessionOutputs === undefined ? {} : { shared: sharedSessionOutputs }),
   });
   const workspaceCheckpoints = config.workspace.strategy === "checkpoint_restore"
     ? new NodeManagedWorkspaceCheckpoints({
@@ -384,6 +386,7 @@ export async function createManagedNodeRuntime(
       runtimeGeneration,
     }) => {
       const preparer = new NodeManagedSessionInputPreparer({
+        sharedOutputs: sharedSessionOutputs !== undefined,
         files: managedPlatform
           .app({ workspaceId })
           .port(managedAgentsPortTokens.files),
@@ -406,6 +409,9 @@ export async function createManagedNodeRuntime(
         sandbox,
         runtimeGeneration,
       });
+      // Shared outputs are not a live mount: hydrate canonical files into a
+      // fresh sandbox so the next turn can read (and republish) prior outputs.
+      await sharedSessionOutputs?.restoreToSandbox(workspaceId, session.id, sandbox);
     },
     synchronizeSandbox: async ({
       workspaceId,
@@ -621,7 +627,7 @@ export async function createManagedNodeRuntime(
   const nodeSessionLifecycleHooks = nodeSessionLifecycle({
     files: filesService,
     filesBlob,
-    outputs: nodeOutputsAdapter(outputsRoot),
+    outputs: sessionOutputs,
   });
   const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
     environments: nodeManagedEnvironments,

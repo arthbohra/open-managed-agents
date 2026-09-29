@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -11,8 +12,11 @@ import type {
   SandboxSessionOutputMountPort,
 } from "@open-managed-agents/sandbox";
 import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
+import { MAX_SESSION_OUTPUT_FILE_BYTES, type NodeSharedSessionOutputs } from "./node-shared-session-outputs.js";
 
 const OUTPUTS_DIR = "/mnt/session/outputs";
+const MANIFEST_BEGIN = "__OPENMA_OUTPUT_MANIFEST_BEGIN__";
+const MANIFEST_END = "__OPENMA_OUTPUT_MANIFEST_END__";
 const MAX_OUTPUT_FILES = 10_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024 * 1024;
 
@@ -26,6 +30,7 @@ export interface SynchronizeNodeManagedSessionOutputs {
 export interface NodeManagedSessionOutputCollectorDependencies {
   outputsRoot: string;
   isFenceActive(fence: SessionExecutionFence): Promise<boolean>;
+  shared?: NodeSharedSessionOutputs;
 }
 
 function assertSafeId(label: string, value: string): void {
@@ -35,7 +40,15 @@ function assertSafeId(label: string, value: string): void {
 }
 
 function decodeOutputPaths(encoded: string): string[] {
-  const value = encoded.trim();
+  if (encoded.includes("[exit ") || encoded.includes("[error: ")) {
+    throw new Error("Sandbox failed to enumerate Session outputs");
+  }
+  const begin = encoded.indexOf(MANIFEST_BEGIN);
+  const end = encoded.indexOf(MANIFEST_END);
+  if ((begin === -1) !== (end === -1) || (begin !== -1 && end <= begin)) {
+    throw new Error("Sandbox returned an incomplete Session output manifest");
+  }
+  const value = (begin === -1 ? encoded : encoded.slice(begin + MANIFEST_BEGIN.length, end)).trim();
   if (value === "") return [];
   if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(value)) {
     throw new Error("Sandbox returned an invalid Session output manifest");
@@ -96,8 +109,8 @@ export class NodeManagedSessionOutputCollector {
     const capabilities = typeof outputMount.sessionOutputMountCapabilities === "function"
       ? outputMount.sessionOutputMountCapabilities()
       : null;
-    if (capabilities?.durability === "durable") return;
-    if (capabilities?.durability !== "best_effort") {
+    if (this.dependencies.shared === undefined && capabilities?.durability === "durable") return;
+    if (this.dependencies.shared === undefined && capabilities?.durability !== "best_effort") {
       throw new Error("Sandbox does not expose collectable Session outputs");
     }
     if (input.sandbox.readFileBytes === undefined) {
@@ -117,27 +130,46 @@ export class NodeManagedSessionOutputCollector {
     );
 
     try {
+      // Frame stdout: VM adapters may append diagnostic stderr to a valid
+      // command's combined output (for example a seccomp warning). The
+      // manifest is still unambiguous, and find failure remains fatal.
+      const manifestFile = `/tmp/openma-output-list-${randomUUID()}`;
       const encoded = await input.sandbox.exec(
-        `find ${OUTPUTS_DIR} -type f -print0 | base64 | tr -d '\\n'`,
+        `if test -d ${OUTPUTS_DIR} && find ${OUTPUTS_DIR} -type f -print0 > '${manifestFile}'; then ` +
+        `printf '${MANIFEST_BEGIN}'; base64 < '${manifestFile}' | tr -d '\\n'; ` +
+        `printf '${MANIFEST_END}'; rm -f '${manifestFile}'; ` +
+        `else rm -f '${manifestFile}'; exit 2; fi`,
       );
       const absolutePaths = decodeOutputPaths(encoded);
       if (absolutePaths.length > MAX_OUTPUT_FILES) {
         throw new Error(`Session output file limit exceeded (${MAX_OUTPUT_FILES})`);
       }
 
+      const sharedOutputs = this.dependencies.shared;
       let totalBytes = 0;
       const seen = new Set<string>();
-      for (const absolutePath of absolutePaths) {
-        const logicalPath = logicalOutputPath(absolutePath);
-        if (seen.has(logicalPath)) {
-          throw new Error(`Duplicate Session output path: ${logicalPath}`);
+      const readFiles = async function* (): AsyncGenerator<readonly [string, Uint8Array]> {
+        for (const absolutePath of absolutePaths) {
+          const logicalPath = logicalOutputPath(absolutePath);
+          if (seen.has(logicalPath)) throw new Error(`Duplicate Session output path: ${logicalPath}`);
+          seen.add(logicalPath);
+          const bytes = await input.sandbox.readFileBytes!(absolutePath);
+          if (bytes.byteLength > MAX_SESSION_OUTPUT_FILE_BYTES && sharedOutputs !== undefined) {
+            throw new Error("Session output file exceeds shared restore size limit");
+          }
+          totalBytes += bytes.byteLength;
+          if (totalBytes > MAX_OUTPUT_BYTES) throw new Error(`Session output byte limit exceeded (${MAX_OUTPUT_BYTES})`);
+          yield [logicalPath, bytes] as const;
         }
-        seen.add(logicalPath);
-        const bytes = await input.sandbox.readFileBytes(absolutePath);
-        totalBytes += bytes.byteLength;
-        if (totalBytes > MAX_OUTPUT_BYTES) {
-          throw new Error(`Session output byte limit exceeded (${MAX_OUTPUT_BYTES})`);
-        }
+      };
+      if (this.dependencies.shared !== undefined) {
+        await this.dependencies.shared.publish({
+          workspaceId: input.workspaceId, sessionId: input.sessionId,
+          fence: input.executionFence, files: readFiles(),
+        });
+        return;
+      }
+      for await (const [logicalPath, bytes] of readFiles()) {
         const destination = join(staging, logicalPath);
         assertInside(staging, destination);
         await mkdir(dirname(destination), { recursive: true });

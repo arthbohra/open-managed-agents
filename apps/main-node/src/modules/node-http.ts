@@ -87,6 +87,7 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
     memoryBlobDescription,
     memoryService,
     outputsRoot,
+    sessionOutputs,
     filesBlob,
     filesBlobDescription,
     newEventLog,
@@ -363,7 +364,7 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
     outputs: {
       workspaceId: (context) =>
         (context.var as { tenant_id: string }).tenant_id,
-      store: nodeOutputsAdapter(outputsRoot),
+      store: sessionOutputs,
     },
   }));
   v1.route("/oma/sessions", buildSessionRoutes({

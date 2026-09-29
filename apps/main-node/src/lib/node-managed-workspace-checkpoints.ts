@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { posix } from "node:path";
+import { Parser } from "tar";
 import type { BlobStore } from "@open-managed-agents/blob-store";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
 import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
@@ -14,9 +16,46 @@ import type {
 const KEY = "openma.workspace.blob-key.v1";
 const PREFIX = "managed-session-workspace-checkpoints";
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+const SIZE_BEGIN = "__OPENMA_WS_SIZE_BEGIN__";
+const SIZE_END = "__OPENMA_WS_SIZE_END__";
 
 function digest(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+/** Validate the effective (PAX/GNU-long-name-aware) entries before either
+ * uploading or extracting. tar's extraction defaults are not an isolation
+ * boundary for absolute/escaping symlinks or hardlinks. */
+async function validateWorkspaceArchive(bytes: Uint8Array): Promise<void> {
+  // Checkpoints are produced with `tar -cf`, never compressed. Do not let a
+  // hostile compressed archive expand without an uncompressed size bound.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) throw new Error("Unsafe workspace archive: compressed input");
+  await new Promise<void>((resolve, reject) => {
+    let invalid: Error | null = null;
+    let entries = 0;
+    const parser = new Parser({ strict: true, maxMetaEntrySize: 1024 * 1024,
+      onReadEntry: (entry) => {
+        if (++entries > 100_000) invalid ??= new Error("Unsafe workspace archive: too many entries");
+        const name = entry.path;
+        if (posix.isAbsolute(name) || name.split("/").includes("..") || name.includes("\0") ||
+          !["Directory", "File", "OldFile", "ContiguousFile", "SymbolicLink", "Link"].includes(entry.type)) {
+          invalid ??= new Error("Unsafe workspace archive: invalid path or entry type");
+        }
+        if (entry.type === "SymbolicLink" || entry.type === "Link") {
+          const link = entry.linkpath ?? "";
+          const target = entry.type === "SymbolicLink" ? posix.join(posix.dirname(name), link) : link;
+          if (!link || posix.isAbsolute(link) || posix.normalize(target) === ".." || posix.normalize(target).startsWith("../")) {
+            invalid ??= new Error("Unsafe workspace archive: link escapes /workspace");
+          }
+        }
+        entry.resume();
+      },
+    });
+    parser.once("error", reject);
+    parser.once("end", () => invalid === null && entries > 0
+      ? resolve() : reject(invalid ?? new Error("Unsafe workspace archive: empty archive")));
+    parser.end(Buffer.from(bytes));
+  });
 }
 
 async function readBoundedArchive(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<Uint8Array> {
@@ -110,8 +149,9 @@ class NodeBlobWorkspacePort implements WorkspacePersistencePort {
     if (digest(bytes) !== candidate.contentHash) {
       throw new Error(`Workspace checkpoint restore failed: archive ${candidate.id} is corrupt`);
     }
+    await validateWorkspaceArchive(bytes);
     if (!this.sandbox.writeFileBytes) throw new Error("Workspace restore requires binary sandbox writes");
-    const temp = `/tmp/openma-workspace-restore-${randomUUID()}.tar`;
+    const temp = `/var/tmp/openma-workspace-restore-${randomUUID()}.tar`;
     try {
       input.signal.throwIfAborted();
       await this.sandbox.writeFileBytes(temp, bytes);
@@ -127,14 +167,21 @@ class NodeBlobWorkspacePort implements WorkspacePersistencePort {
     input.signal.throwIfAborted();
     if (input.strategy !== "checkpoint_restore") throw new Error(`Node workspace does not support ${input.strategy}`);
     if (!this.sandbox.readFileBytes) throw new Error("Workspace checkpoint requires binary sandbox reads");
-    const temp = `/tmp/openma-workspace-${randomUUID()}.tar`;
+    const temp = `/var/tmp/openma-workspace-${randomUUID()}.tar`;
     let bytes: Uint8Array;
     try {
       const result = await this.sandbox.exec(`tar -C /workspace -cf '${temp}' .`, 120_000);
       if (failed(result)) throw new Error(`Workspace checkpoint archive failed: ${result.slice(0, 200)}`);
-      const sizeOutput = await this.sandbox.exec(`wc -c < '${temp}'`, 5_000);
-      const size = Number(sizeOutput.trim());
-      if (failed(sizeOutput) || !/^\d+$/u.test(sizeOutput.trim()) || !Number.isSafeInteger(size)) {
+      const sizeOutput = await this.sandbox.exec(
+        `printf '${SIZE_BEGIN}'; wc -c < '${temp}'; printf '${SIZE_END}'`, 5_000,
+      );
+      const start = sizeOutput.indexOf(SIZE_BEGIN);
+      const end = sizeOutput.indexOf(SIZE_END);
+      const reportedSize = start >= 0 && end > start
+        ? sizeOutput.slice(start + SIZE_BEGIN.length, end).trim()
+        : "";
+      const size = Number(reportedSize);
+      if (failed(sizeOutput) || !/^\d+$/u.test(reportedSize) || !Number.isSafeInteger(size)) {
         throw new Error("Workspace checkpoint archive size could not be verified");
       }
       if (size > MAX_ARCHIVE_BYTES) throw new Error("Workspace checkpoint archive exceeds maximum size");
@@ -146,6 +193,7 @@ class NodeBlobWorkspacePort implements WorkspacePersistencePort {
       await this.sandbox.exec(`rm -f '${temp}'`, 5_000).catch(() => undefined);
     }
     input.signal.throwIfAborted();
+    await validateWorkspaceArchive(bytes);
     const id = `wsc_${randomUUID()}`;
     const key = `${prefix(input.scope)}${id}.tar`;
     const stored = await this.blobs.put(key, bytes, {

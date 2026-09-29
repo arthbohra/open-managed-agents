@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,11 +22,14 @@ async function sandbox(): Promise<SandboxExecutor> {
   roots.push(root);
   await mkdir(join(root, "workspace"));
   await mkdir(join(root, "tmp"));
+  await mkdir(join(root, "var-tmp"));
   const path = (name: string) => name.replace(/^\/workspace\b/, join(root, "workspace"))
+    .replace(/^\/var\/tmp\b/, join(root, "var-tmp"))
     .replace(/^\/tmp\b/, join(root, "tmp"));
   return {
     async exec(command) {
       const cmd = command.replace(/\/workspace\b/g, join(root, "workspace"))
+        .replace(/\/var\/tmp\b/g, join(root, "var-tmp"))
         .replace(/\/tmp\b/g, join(root, "tmp"));
       const result = spawnSync("/bin/sh", ["-c", cmd], { encoding: "utf8" });
       return result.status === 0 ? result.stdout : `${result.stderr}[exit ${result.status}]`;
@@ -284,6 +288,83 @@ describe("official Node Managed Session workspace checkpoints", () => {
       signal: new AbortController().signal })).rejects.toThrow(/restore failed/i);
   });
 
+  it("uses provider-copyable /var/tmp rather than container-only /tmp for archive transfer", async () => {
+    const { checkpoints, fence } = await fixture();
+    const source = await sandbox();
+    await source.writeFile("/workspace/report.txt", "canonical");
+    const copyable: SandboxExecutor = { ...source,
+      readFileBytes: async (name) => {
+        expect(name).toMatch(/^\/var\/tmp\/openma-workspace-/);
+        return source.readFileBytes!(name);
+      },
+    };
+    const candidate = await createCandidate(checkpoints, copyable, fence);
+    expect(candidate.contentHash).toMatch(/^sha256:/);
+  });
+
+  it("rejects workspace symlinks escaping the archive root before publishing bytes", async () => {
+    const { checkpoints, blobs, fence } = await fixture();
+    const source = await sandbox();
+    expect(await source.exec("ln -s /etc/passwd /workspace/escape")).toBe("");
+    const upload = vi.spyOn(blobs, "put");
+    await expect(createCandidate(checkpoints, source, fence)).rejects.toThrow(/unsafe workspace archive/i);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unsafe canonical archive before writing bytes into the replacement sandbox", async () => {
+    const { checkpoints, blobs, fence } = await fixture();
+    const source = await sandbox();
+    expect(await source.exec("ln -s /etc/passwd /workspace/escape && tar -C /workspace -cf /var/tmp/unsafe.tar .")).toBe("");
+    const bytes = await source.readFileBytes!("/var/tmp/unsafe.tar");
+    const id = `wsc_${randomUUID()}`;
+    const key = `managed-session-workspace-checkpoints/${scope.workspaceId}/${scope.sessionId}/${id}.tar`;
+    await blobs.put(key, bytes);
+    const candidate = { id, contentHash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+      revision: fence.generation, metadata: { "openma.workspace.blob-key.v1": key } };
+    expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
+    const fresh = await sandbox();
+    const write = vi.spyOn(fresh, "writeFileBytes");
+    const port = checkpoints.port(fresh);
+    const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+    const binding = await port.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: candidate, idempotencyKey: "unsafe", signal: new AbortController().signal });
+    await expect(port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
+      sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal }))
+      .rejects.toThrow(/unsafe workspace archive/i);
+    expect(write).not.toHaveBeenCalled();
+    expect((await checkpoints.active(scope))?.candidate.id).toBe(id);
+  });
+
+  it("accepts relative symlinks contained entirely within /workspace", async () => {
+    const { checkpoints, fence } = await fixture();
+    const source = await sandbox();
+    await source.writeFile("/workspace/report.txt", "linked");
+    expect(await source.exec("ln -s report.txt /workspace/link.txt")).toBe("");
+    const candidate = await createCandidate(checkpoints, source, fence);
+    expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
+    const fresh = await sandbox();
+    const port = checkpoints.port(fresh);
+    const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+    const binding = await port.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: candidate, idempotencyKey: "relative-link", signal: new AbortController().signal });
+    await port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
+      sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal });
+    expect(await fresh.readFile("/workspace/link.txt")).toBe("linked");
+  });
+
+  it("verifies archive size despite provider diagnostic stderr in successful exec output", async () => {
+    const { checkpoints, fence } = await fixture();
+    const source = await sandbox();
+    await source.writeFile("/workspace/report.txt", "canonical");
+    const noisy: SandboxExecutor = { ...source,
+      exec: async (command, timeout) => command.includes("wc -c")
+        ? `${await source.exec(command, timeout)}\nseccomp not available`
+        : source.exec(command, timeout),
+    };
+    const candidate = await createCandidate(checkpoints, noisy, fence);
+    expect(candidate.contentHash).toMatch(/^sha256:/);
+  });
+
   it("rejects oversized archives before loading sandbox or S3 bytes", async () => {
     const { checkpoints, fence, blobs, sql } = await fixture();
     const first = await sandbox();
@@ -293,8 +374,8 @@ describe("official Node Managed Session workspace checkpoints", () => {
     const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
     let sandboxRead = false;
     const huge = checkpoints.port({ ...first,
-      exec: async (command, timeout) => command.startsWith("wc -c")
-        ? String(256 * 1024 * 1024 + 1)
+      exec: async (command, timeout) => command.includes("wc -c")
+        ? `__OPENMA_WS_SIZE_BEGIN__${256 * 1024 * 1024 + 1}__OPENMA_WS_SIZE_END__`
         : first.exec(command, timeout),
       readFileBytes: async () => { sandboxRead = true; throw new Error("should not read huge tar"); },
     });

@@ -111,6 +111,34 @@ describe("SqlSessionExecutionCoordinator", () => {
     coordinator = new SqlSessionExecutionCoordinator(sql);
   });
 
+  it("claims a default-mode Session without preparing the optional checkpoint-only lock table", async () => {
+    await sql.exec("DROP TABLE managed_session_claim_locks");
+    await coordinator.admit(admitted("no-lock", "session_01", at(1)));
+    const result = await coordinator.claim({ ownerId: "ordinary_node", attemptId: "ordinary_attempt",
+      claimedAt: at(2), leaseTtlMs: 10_000 });
+    expect(result.type).toBe("claimed");
+  });
+
+  it("retries a rolled-back MySQL deadlock during concurrent serialized Session claim", async () => {
+    let attempts = 0;
+    const retryingSql: SqlClient = {
+      prepare: (statement) => sql.prepare(statement),
+      exec: (statement) => sql.exec(statement),
+      batch: async (statements) => {
+        attempts++;
+        if (attempts === 2) throw Object.assign(new Error("Deadlock found when trying to get lock"), { code: "ER_LOCK_DEADLOCK", errno: 1213 });
+        return sql.batch(statements);
+      },
+    };
+    const retrying = new SqlSessionExecutionCoordinator(retryingSql, { serializeSessionClaims: true });
+    await retrying.admit(admitted("deadlock", "session_01", at(1)));
+    const claimed = await retrying.claim({ ownerId: "recovered", attemptId: "recovered_attempt",
+      claimedAt: at(2), leaseTtlMs: 10_000 });
+    expect(claimed.type).toBe("claimed");
+    expect(attempts).toBe(4);
+    if (claimed.type === "claimed") expect(claimed.execution.attemptCount).toBe(1);
+  });
+
   it("serializes opted-in cross-lane claims across owners without changing default lane concurrency", async () => {
     const root = await mkdtemp(join(tmpdir(), "openma-serial-claims-"));
     roots.push(root);

@@ -33,6 +33,8 @@ export interface NodeManagedSessionInputPreparerDependencies {
   skillVersions: SkillVersionSource;
   repositoryCredentials: Pick<SessionResourceSecretSource, "findGithubToken">;
   memorySnapshots: NodeManagedMemorySnapshotPort;
+  /** Shared OSS collection uses provider-local outputs, not a FUSE mount. */
+  sharedOutputs?: boolean;
 }
 
 export function buildNodeManagedSkillReminders(
@@ -109,15 +111,17 @@ export class NodeManagedSessionInputPreparer {
   ) {}
 
   async prepare(input: PrepareNodeManagedSessionInputs): Promise<void> {
-    if (!supportsSessionOutputMount(input.sandbox)) {
-      throw new Error(
-        "Managed Session runtime requires durable session outputs, but the selected sandbox does not provide them",
-      );
+    if (!this.dependencies.sharedOutputs) {
+      if (!supportsSessionOutputMount(input.sandbox)) {
+        throw new Error(
+          "Managed Session runtime requires durable session outputs, but the selected sandbox does not provide them",
+        );
+      }
+      await input.sandbox.mountSessionOutputs({
+        tenantId: input.workspaceId,
+        sessionId: input.session.id,
+      });
     }
-    await input.sandbox.mountSessionOutputs({
-      tenantId: input.workspaceId,
-      sessionId: input.session.id,
-    });
     await input.sandbox.setEnvVars?.({
       OMA_OUTPUTS_DIR: "/mnt/session/outputs",
     });
@@ -160,6 +164,11 @@ export class NodeManagedSessionInputPreparer {
         [`OMA_MEMORY_${storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]:
           `/mnt/memory/${storeName}`,
       });
+    }
+
+    if (this.dependencies.sharedOutputs) {
+      const command = "mkdir -p /mnt/session/outputs";
+      assertCommandSucceeded(command, await input.sandbox.exec(command, 30_000));
     }
 
     const repositories = input.session.resources.filter(

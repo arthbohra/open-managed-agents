@@ -365,7 +365,7 @@ export class DefaultNodeManagedSessionRunner
         throw new Error("Managed workspace checkpoint changed; reacquire the sandbox");
       }
     }
-    // Until the turn, Memory/output sync and any due checkpoint all settle,
+    // Until the turn, Memory/output sync and due checkpoints all settle,
     // a replacement attempt must cold-restore rather than reuse dirty bytes.
     if (workspace !== undefined) workspace.trusted = false;
     const abortController = new AbortController();
