@@ -43,8 +43,7 @@ interface S3HeadOutput {
 }
 interface S3GetOutput extends S3HeadOutput {
   Body?: {
-    transformToByteArray(): Promise<Uint8Array>;
-    transformToString(): Promise<string>;
+    transformToWebStream(): ReadableStream<Uint8Array>;
   };
 }
 interface S3PutOutput {
@@ -126,23 +125,18 @@ export class S3BlobStore implements BlobStore {
         new GetObjectCommand({ Bucket: this.bucket, Key: this.fullKey(key) }),
       );
       const meta = toMetadata(out);
-      const bytesPromise = (async () => {
-        return out.Body ? await out.Body.transformToByteArray() : new Uint8Array();
-      })();
-      let cachedBytes: Uint8Array | null = null;
-      const bytes = async () => {
-        if (cachedBytes) return cachedBytes;
-        cachedBytes = await bytesPromise;
-        return cachedBytes;
-      };
+      // Expose the SDK's actual stream, not a ReadableStream whose start()
+      // eagerly drains the entire object before a caller can enforce limits.
+      const body = out.Body?.transformToWebStream() ?? new ReadableStream<Uint8Array>({
+        start(controller) { controller.close(); },
+      });
+      let bytesPromise: Promise<Uint8Array> | undefined;
+      const bytes = () => bytesPromise ??= new Response(body).arrayBuffer().then(
+        (buffer) => new Uint8Array(buffer),
+      );
       return {
         ...meta,
-        body: new ReadableStream<Uint8Array>({
-          async start(controller) {
-            controller.enqueue(await bytes());
-            controller.close();
-          },
-        }),
+        body,
         text: async () => new TextDecoder("utf-8").decode(await bytes()),
         arrayBuffer: async () => {
           const b = await bytes();

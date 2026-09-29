@@ -19,6 +19,38 @@ function digest(bytes: Uint8Array): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+async function readBoundedArchive(body: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<Uint8Array> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const onAbort = () => { void reader.cancel(signal.reason).catch(() => {}); };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const { value, done } = await reader.read();
+      signal.throwIfAborted();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_ARCHIVE_BYTES) {
+        await reader.cancel("Workspace checkpoint archive exceeds maximum size").catch(() => {});
+        throw new Error("Workspace checkpoint archive exceeds maximum size");
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+}
+
 function prefix(scope: Pick<RuntimeResourceScope, "workspaceId" | "sessionId">): string {
   return `${PREFIX}/${encodeURIComponent(scope.workspaceId)}/${encodeURIComponent(scope.sessionId)}/`;
 }
@@ -32,7 +64,10 @@ function archiveKey(candidate: { id: string; metadata?: Readonly<Record<string, 
 }
 
 function failed(command: string): boolean {
-  return /\[exit [1-9]\d*\]/u.test(command);
+  // SandboxExecutor adapters append an exit marker only on nonzero exit.
+  // LocalSubprocess uses `[exit exit=2]` (or `[exit signal=SIGTERM]`),
+  // while remote adapters use `[exit 2]`; spawning can return `[error: ...]`.
+  return command.includes("[exit ") || command.includes("[error: ");
 }
 
 /** Blob-backed implementation of the existing workspace resource Port. It
@@ -63,10 +98,15 @@ class NodeBlobWorkspacePort implements WorkspacePersistencePort {
     const candidate = this.active.get(input.binding.bindingId);
     if (candidate === undefined) return;
     const key = archiveKey(candidate, input.scope);
+    // S3BlobStore.get may begin draining its body immediately. HEAD first so
+    // an obviously oversized object is rejected before allocating its bytes.
+    const metadata = await this.blobs.head(key);
+    if (metadata === null) throw new Error(`Workspace checkpoint restore failed: archive ${candidate.id} is missing`);
+    if (metadata.size > MAX_ARCHIVE_BYTES) throw new Error("Workspace checkpoint archive exceeds maximum size");
     const blob = await this.blobs.get(key);
     if (blob === null) throw new Error(`Workspace checkpoint restore failed: archive ${candidate.id} is missing`);
     if (blob.size > MAX_ARCHIVE_BYTES) throw new Error("Workspace checkpoint archive exceeds maximum size");
-    const bytes = await blob.bytes();
+    const bytes = await readBoundedArchive(blob.body, input.signal);
     if (digest(bytes) !== candidate.contentHash) {
       throw new Error(`Workspace checkpoint restore failed: archive ${candidate.id} is corrupt`);
     }
@@ -92,8 +132,16 @@ class NodeBlobWorkspacePort implements WorkspacePersistencePort {
     try {
       const result = await this.sandbox.exec(`tar -C /workspace -cf '${temp}' .`, 120_000);
       if (failed(result)) throw new Error(`Workspace checkpoint archive failed: ${result.slice(0, 200)}`);
+      const sizeOutput = await this.sandbox.exec(`wc -c < '${temp}'`, 5_000);
+      const size = Number(sizeOutput.trim());
+      if (failed(sizeOutput) || !/^\d+$/u.test(sizeOutput.trim()) || !Number.isSafeInteger(size)) {
+        throw new Error("Workspace checkpoint archive size could not be verified");
+      }
+      if (size > MAX_ARCHIVE_BYTES) throw new Error("Workspace checkpoint archive exceeds maximum size");
       bytes = await this.sandbox.readFileBytes(temp);
-      if (bytes.byteLength > MAX_ARCHIVE_BYTES) throw new Error("Workspace checkpoint archive exceeds maximum size");
+      if (bytes.byteLength > MAX_ARCHIVE_BYTES || bytes.byteLength !== size) {
+        throw new Error("Workspace checkpoint archive exceeds maximum size or changed during read");
+      }
     } finally {
       await this.sandbox.exec(`rm -f '${temp}'`, 5_000).catch(() => undefined);
     }

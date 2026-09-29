@@ -223,6 +223,125 @@ describe("official Node Managed Session workspace checkpoints", () => {
     expect(runner.connectedSandbox(scope)).toBeNull();
   });
 
+  it("discards uncommitted workspace writes after a failed attempt instead of reusing that sandbox", async () => {
+    const { checkpoints, fence } = await fixture();
+    const first = await sandbox();
+    const second = await sandbox();
+    let allocations = 0;
+    let destroyed = false;
+    const firstDestroy = first.destroy?.bind(first);
+    first.destroy = async () => { destroyed = true; await firstDestroy?.(); };
+    const session = { id: scope.sessionId, resources: [], agent: { skills: [] } } as never;
+    const environment = { id: scope.environmentId, config: {} } as never;
+    const runner = new DefaultNodeManagedSessionRunner({
+      workspaceCheckpoints: checkpoints,
+      buildSandbox: async () => ++allocations === 1 ? first : second,
+      outcomes: { evaluate: async () => { throw new Error("unexpected"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected"); } },
+      buildModel: async () => ({} as never), buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => {
+        await first.writeFile("/workspace/uncommitted.txt", "never published");
+        throw new Error("harness failed");
+      } }),
+      buildHarnessContext: async (input) => input as never,
+      clock: { now: () => new Date() }, ids: { nextEventId: () => "evt_1" },
+    });
+    const start = { workspaceId: scope.workspaceId, sessionId: scope.sessionId,
+      session, environment, initialEvents: [], executionFence: fence };
+    await runner.start(start);
+    const event = { id: "event_1", type: "user.message", content: [{ type: "text", text: "run" }] } as never;
+    await expect(runner.accept({ ...start, events: [event], historyEvents: [event],
+      output: async () => undefined })).rejects.toThrow("harness failed");
+    const reclaimed = { ...fence, attemptId: "attempt_2", generation: fence.generation + 1 };
+    await runner.start({ ...start, executionFence: reclaimed });
+    expect(allocations).toBe(2);
+    expect(destroyed).toBe(true);
+    expect(runner.connectedSandbox(scope)).toBe(second);
+    await expect(second.readFile("/workspace/uncommitted.txt")).rejects.toThrow(/ENOENT/);
+  });
+
+  it("fails closed on the real local-subprocess exit suffix during archive and restore", async () => {
+    const { checkpoints, fence } = await fixture();
+    const source = await sandbox();
+    await source.writeFile("/workspace/report.txt", "canonical");
+    const good = await createCandidate(checkpoints, source, fence);
+    expect(await checkpoints.publish({ fence, candidate: good, expectedId: null })).toBe(true);
+    const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+    const brokenArchive = checkpoints.port({ ...source, exec: async () => "[exit exit=2]" });
+    const newBinding = await brokenArchive.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: null, idempotencyKey: "archive-fail", signal: new AbortController().signal });
+    await expect(brokenArchive.checkpoint({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      binding: newBinding, sandbox: { provider: "node", runtimeId: "sandbox_1" },
+      idempotencyKey: "archive-fail", signal: new AbortController().signal })).rejects.toThrow(/archive failed/i);
+    const fresh = await sandbox();
+    const brokenRestore = checkpoints.port({ ...fresh,
+      exec: async (command, timeout) => command.includes("tar -xf") ? "[exit exit=2]" : fresh.exec(command, timeout),
+    });
+    const oldBinding = await brokenRestore.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: good, idempotencyKey: "restore-fail", signal: new AbortController().signal });
+    await expect(brokenRestore.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      binding: oldBinding, sandbox: { provider: "node", runtimeId: "sandbox_2" },
+      signal: new AbortController().signal })).rejects.toThrow(/restore failed/i);
+  });
+
+  it("rejects oversized archives before loading sandbox or S3 bytes", async () => {
+    const { checkpoints, fence, blobs, sql } = await fixture();
+    const first = await sandbox();
+    await first.writeFile("/workspace/report.txt", "canonical");
+    const candidate = await createCandidate(checkpoints, first, fence);
+    expect(await checkpoints.publish({ fence, candidate, expectedId: null })).toBe(true);
+    const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+    let sandboxRead = false;
+    const huge = checkpoints.port({ ...first,
+      exec: async (command, timeout) => command.startsWith("wc -c")
+        ? String(256 * 1024 * 1024 + 1)
+        : first.exec(command, timeout),
+      readFileBytes: async () => { sandboxRead = true; throw new Error("should not read huge tar"); },
+    });
+    const newBinding = await huge.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: null, idempotencyKey: "size", signal: new AbortController().signal });
+    await expect(huge.checkpoint({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      binding: newBinding, sandbox: { provider: "node", runtimeId: "sandbox_1" },
+      idempotencyKey: "size", signal: new AbortController().signal })).rejects.toThrow(/maximum size/);
+    expect(sandboxRead).toBe(false);
+    let remoteRead = false;
+    const oversized = new NodeManagedWorkspaceCheckpoints({ sql, intervalMs: 30_000,
+      blobs: {
+        head: async () => ({ size: 256 * 1024 * 1024 + 1, etag: "too-big" }),
+        get: async () => { remoteRead = true; throw new Error("should not GET huge blob"); },
+        put: (...args) => blobs.put(...args), delete: (key) => blobs.delete(key),
+      },
+    });
+    const port = oversized.port(await sandbox());
+    const binding = await port.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: candidate, idempotencyKey: "restore-huge", signal: new AbortController().signal });
+    await expect(port.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      binding, sandbox: { provider: "node", runtimeId: "sandbox_2" }, signal: new AbortController().signal }))
+      .rejects.toThrow(/maximum size/);
+    expect(remoteRead).toBe(false);
+    const streaming = new NodeManagedWorkspaceCheckpoints({ sql, intervalMs: 30_000,
+      blobs: {
+        head: (key) => blobs.head(key),
+        get: async (key) => {
+          const blob = await blobs.get(key);
+          return blob === null ? null : {
+            ...blob,
+            bytes: async () => { throw new Error("unbounded archive read"); },
+          };
+        },
+        put: (...args) => blobs.put(...args), delete: (key) => blobs.delete(key),
+      },
+    });
+    const restored = await sandbox();
+    const streamPort = streaming.port(restored);
+    const streamBinding = await streamPort.materialize({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      activeCheckpoint: candidate, idempotencyKey: "restore-stream", signal: new AbortController().signal });
+    await expect(streamPort.attach({ scope, fence: runtimeFence, strategy: "checkpoint_restore",
+      binding: streamBinding, sandbox: { provider: "node", runtimeId: "sandbox_3" },
+      signal: new AbortController().signal })).resolves.toBeUndefined();
+    expect(await restored.readFile("/workspace/report.txt")).toBe("canonical");
+  });
+
   it("does not publish when uploading a candidate fails and never snapshots a durable mount", async () => {
     const { checkpoints, fence } = await fixture();
     const failing = await sandbox();

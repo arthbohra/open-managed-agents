@@ -55,6 +55,8 @@ interface ManagedWorkspaceState {
   scope: RuntimeResourceScope;
   fence: SessionExecutionFence;
   activeId: string | null;
+  /** A failed/interrupted turn may leave bytes that were never published. */
+  trusted: boolean;
 }
 
 export type ManagedNodeToolConfirmation = Extract<
@@ -210,13 +212,14 @@ export class DefaultNodeManagedSessionRunner
       environment: input.environment.config,
     });
     const existing = this.sandboxes.get(input);
-    if (
-      existing !== undefined &&
-      this.sandboxConfigurationFingerprints.get(input) === fingerprint
-    ) return;
     if (this.dependencies.workspaceCheckpoints !== undefined && input.executionFence === undefined) {
       throw new Error("Managed workspace checkpoint_restore requires a Session Execution fence");
     }
+    if (
+      existing !== undefined &&
+      this.sandboxConfigurationFingerprints.get(input) === fingerprint &&
+      (this.dependencies.workspaceCheckpoints === undefined || this.workspaces.get(input)?.trusted === true)
+    ) return;
     if (existing !== undefined) {
       const previousWorkspace = this.workspaces.get(input);
       this.workspaces.delete(input);
@@ -264,7 +267,7 @@ export class DefaultNodeManagedSessionRunner
           idempotencyKey: runtimeGeneration,
           signal: new AbortController().signal,
         });
-        workspace = { port, binding, scope, fence, activeId: active?.candidate.id ?? null };
+        workspace = { port, binding, scope, fence, activeId: active?.candidate.id ?? null, trusted: true };
         // A missing/corrupt published archive is a hard failure. Session
         // inputs and the harness must never observe an empty replacement.
         await port.attach({
@@ -362,6 +365,9 @@ export class DefaultNodeManagedSessionRunner
         throw new Error("Managed workspace checkpoint changed; reacquire the sandbox");
       }
     }
+    // Until the turn, Memory/output sync and any due checkpoint all settle,
+    // a replacement attempt must cold-restore rather than reuse dirty bytes.
+    if (workspace !== undefined) workspace.trusted = false;
     const abortController = new AbortController();
     this.abortControllers.set(input, abortController);
     // The Node execution worker owns the durable fence and cancels this
@@ -686,6 +692,9 @@ export class DefaultNodeManagedSessionRunner
       }
       if (finalizationError !== undefined && !runFailed) {
         throw finalizationError;
+      }
+      if (workspace !== undefined && !runFailed && !abortController.signal.aborted) {
+        workspace.trusted = true;
       }
     }
   }
