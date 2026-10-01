@@ -579,7 +579,7 @@ export async function createManagedNodeRuntime(
         await managedRuntimeDriver.accept({ ...input, executionFence: fence });
       },
       cancel: async (input) => {
-        managedRuntimeRunner.cancel(input);
+        managedRuntimeRunner.cancel({ workspaceId: input.workspaceId, sessionId: input.sessionId, reason: input.reason });
       },
     },
     ownerId: config.execution.ownerId,

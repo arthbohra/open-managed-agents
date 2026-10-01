@@ -1129,6 +1129,48 @@ describe("DefaultNodeManagedSessionRunner", () => {
     ]);
   });
 
+  it("does not report a failed turn when the execution lease was lost (another owner takes over)", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let nextId = 0;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => ({}) as SandboxExecutor,
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({
+        run: async (context) => {
+          const signal = (context as { runtime: { abortSignal?: AbortSignal } }).runtime.abortSignal!;
+          markStarted?.();
+          // A model request rejects when its signal aborts.
+          await new Promise<void>((_, reject) => signal.addEventListener("abort",
+            () => reject(new Error("This operation was aborted")), { once: true }));
+        },
+      }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T04:00:00.000Z") },
+      ids: { nextEventId: () => `event_lease_0${++nextId}` },
+    });
+    await runner.start({ workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [] });
+    const output: Array<{ type: string }> = [];
+    const message: NodeManagedSessionRunnerAcceptInput["events"][number] = {
+      id: "event_user_lease", type: "user.message",
+      content: [{ type: "text", text: "Long task" }], processedAt: "2026-08-26T03:30:00.000Z",
+    };
+    const turn = runner.accept({ workspaceId: "workspace_01", sessionId: session.id, session, environment,
+      initialEvents: [], events: [message], historyEvents: [message],
+      output: async (frame) => { output.push(frame as { type: string }); } });
+    await started;
+    runner.cancel({ workspaceId: "workspace_01", sessionId: session.id, reason: "lease_lost" });
+    await expect(turn).rejects.toThrow("aborted");
+    expect(output.map((frame) => frame.type)).toEqual(["session.status_running"]);
+  });
+
   it("owns and destroys sandboxes by workspace and session scope", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath) as {

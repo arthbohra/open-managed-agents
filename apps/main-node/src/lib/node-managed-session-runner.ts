@@ -199,8 +199,10 @@ export class DefaultNodeManagedSessionRunner
     private readonly dependencies: DefaultNodeManagedSessionRunnerDependencies,
   ) {}
 
-  cancel(input: { workspaceId: string; sessionId: string }): void {
-    this.abortControllers.get(input)?.abort();
+  /** `lease_lost` means another owner will reclaim and re-run this execution:
+   * the stale attempt must not tell the client its turn failed. */
+  cancel(input: { workspaceId: string; sessionId: string; reason?: string }): void {
+    this.abortControllers.get(input)?.abort(input.reason ?? "cancelled");
   }
 
   /** Returns only a prepared live runtime, scoped exactly like execution. */
@@ -589,6 +591,7 @@ export class DefaultNodeManagedSessionRunner
       }
     } catch (error) {
       runFailed = true;
+      if (abortController.signal.reason === "lease_lost") throw error;
       runtime.broadcastProducedEvent({
         type: "session.error",
         error: {
@@ -666,7 +669,8 @@ export class DefaultNodeManagedSessionRunner
           finalizationError = error instanceof Error ? error : new Error(String(error));
         }
       }
-      if (finalizationError !== undefined && !runFailed) {
+      const leaseLost = abortController.signal.reason === "lease_lost";
+      if (finalizationError !== undefined && !runFailed && !leaseLost) {
         runtime.broadcastProducedEvent({
           type: "session.error",
           error: {
@@ -678,10 +682,12 @@ export class DefaultNodeManagedSessionRunner
           },
         });
       }
-      runtime.broadcastProducedEvent({
-        type: "session.status_idle",
-        stopReason: { type: runFailed || finalizationError !== undefined ? "retries_exhausted" : "end_turn" },
-      });
+      if (!leaseLost) {
+        runtime.broadcastProducedEvent({
+          type: "session.status_idle",
+          stopReason: { type: runFailed || finalizationError !== undefined ? "retries_exhausted" : "end_turn" },
+        });
+      }
       try {
         await runtime.drain();
         if (input.executionFence !== undefined) {
