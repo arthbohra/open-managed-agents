@@ -445,76 +445,78 @@ describe("DefaultNodeManagedSessionRunner", () => {
     expect(lifecycle).toEqual(["run", "dispose", "synchronize", "idle", "afterExecution", "publicationReported"]);
   });
 
-  it("reports a failed turn as exhausted (no automatic retry after agent side effects) and goes idle", async () => {
+  async function failingHarnessTurn(run: (context: { runtime: { broadcast(event: unknown): void } }) => Promise<void>) {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath) as {
       DefaultNodeManagedSessionRunner: RunnerConstructor;
     };
-    const sandbox = {} as SandboxExecutor;
     let nextId = 0;
+    let runs = 0;
     const runner = new runnerModule.DefaultNodeManagedSessionRunner({
       outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
       confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
-      buildSandbox: async () => sandbox,
+      buildSandbox: async () => ({}) as SandboxExecutor,
       buildModel: async () => ({}),
       buildTools: async () => ({}),
-      buildHarness: () => ({
-        run: async () => { throw new Error("model unavailable"); },
-      }),
+      buildHarness: () => ({ run: async (context) => { runs += 1; await run(context as never); } }),
       buildHarnessContext: async (input) => input,
       clock: { now: () => new Date("2026-08-26T03:00:00.000Z") },
       ids: { nextEventId: () => `event_error_0${++nextId}` },
-    });
-    await runner.start({
-      workspaceId: "workspace_01",
-      sessionId: session.id,
-      session,
-      environment,
-      initialEvents: [],
-    });
-    const output: unknown[] = [];
+      harnessRetry: { attempts: 3, delayMs: () => 0 },
+    } as never);
+    await runner.start({ workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [] });
+    const output: Array<Record<string, unknown>> = [];
     const event: NodeManagedSessionRunnerAcceptInput["events"][number] = {
-      id: "event_user_02",
-      type: "user.message",
-      content: [{ type: "text", text: "Retry" }],
-      processedAt: "2026-08-26T02:30:00.000Z",
+      id: "event_user_02", type: "user.message",
+      content: [{ type: "text", text: "Retry" }], processedAt: "2026-08-26T02:30:00.000Z",
     };
+    const result = await runner.accept({
+      workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [],
+      events: [event], historyEvents: [event],
+      output: async (frame) => { output.push(frame as Record<string, unknown>); },
+    }).then(() => undefined, (error: unknown) => error);
+    const summary = output.map((frame) => frame.type === "session.error"
+      ? `error:${(frame.error as { retry_status: string }).retry_status}`
+      : frame.type === "session.status_idle"
+        ? `idle:${(frame.stop_reason as { type: string }).type}`
+        : String(frame.type));
+    return { result, runs, summary };
+  }
 
-    await expect(
-      runner.accept({
-        workspaceId: "workspace_01",
-        sessionId: session.id,
-        session,
-        environment,
-        initialEvents: [],
-        events: [event],
-        historyEvents: [event],
-        output: async (frame) => { output.push(frame); },
-      }),
-    ).rejects.toThrow("model unavailable");
+  it("reports a failed turn as exhausted without retry once the agent produced side effects", async () => {
+    const { result, runs, summary } = await failingHarnessTurn(async ({ runtime }) => {
+      runtime.broadcast({ type: "agent.tool_use", id: "tool_01", name: "bash", input: { command: "touch x" } });
+      throw new Error("model unavailable");
+    });
+    expect((result as Error).message).toBe("model unavailable");
+    expect(runs).toBe(1);
+    expect(summary).toEqual(["session.status_running", "agent.tool_use", "error:exhausted", "idle:retries_exhausted"]);
+  });
 
-    expect(output).toEqual([
-      {
-        id: "event_error_01",
-        type: "session.status_running",
-        processed_at: "2026-08-26T03:00:00.000Z",
-      },
-      {
-        id: "event_error_02",
-        type: "session.error",
-        error: {
-          type: "unknown_error",
-          message: "model unavailable",
-          retry_status: "exhausted",
-        },
-        processed_at: "2026-08-26T03:00:00.000Z",
-      },
-      {
-        id: "event_error_03",
-        type: "session.status_idle",
-        stop_reason: { type: "retries_exhausted" },
-        processed_at: "2026-08-26T03:00:00.000Z",
-      },
+  it("retries a harness failure in place while the turn has no agent side effects", async () => {
+    let failures = 2;
+    const { result, runs, summary } = await failingHarnessTurn(async () => {
+      if (failures-- > 0) throw new Error("No output generated. Check the stream for errors.");
+    });
+    expect(result).toBeUndefined();
+    expect(runs).toBe(3);
+    expect(summary).toEqual([
+      "session.status_running",
+      "error:retrying", "session.status_rescheduled",
+      "error:retrying", "session.status_rescheduled",
+      "idle:end_turn",
+    ]);
+  });
+
+  it("reports exhausted after the side-effect-free retries run out", async () => {
+    const { result, runs, summary } = await failingHarnessTurn(async () => { throw new Error("model unavailable"); });
+    expect((result as Error).message).toBe("model unavailable");
+    expect(runs).toBe(3);
+    expect(summary).toEqual([
+      "session.status_running",
+      "error:retrying", "session.status_rescheduled",
+      "error:retrying", "session.status_rescheduled",
+      "error:exhausted", "idle:retries_exhausted",
     ]);
   });
 

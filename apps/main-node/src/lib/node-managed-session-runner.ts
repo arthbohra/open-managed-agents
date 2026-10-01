@@ -118,6 +118,13 @@ export interface ManagedNodeOutcomeEvaluationPort {
 }
 
 export interface DefaultNodeManagedSessionRunnerDependencies {
+  /**
+   * In-place retry of a harness failure while the turn has produced no
+   * `agent.*` event (e.g. the model call failed before any output). Each
+   * retry emits `session.error{retrying}` + `session.status_rescheduled`.
+   * Default: 3 attempts, backoff min(30s, 2s * 2^(n-1)).
+   */
+  harnessRetry?: { attempts: number; delayMs(attempt: number): number };
   subagentThreads?: ManagedNodeSubagentThreads;
   subagentPolicy?(input: ManagedRunnerContext): ManagedNodeSubagentPolicy | Promise<ManagedNodeSubagentPolicy>;
   resolveSubagentSession?(input: ManagedRunnerContext & { request: ManagedNodeCreateSubagent }): Promise<Session>;
@@ -514,7 +521,29 @@ export class DefaultNodeManagedSessionRunner
           model,
           tools,
         });
-        await this.dependencies.buildHarness().run(harnessContext);
+        const retry = this.dependencies.harnessRetry ??
+          { attempts: 3, delayMs: (attempt: number) => Math.min(30_000, 2_000 * 2 ** (attempt - 1)) };
+        for (let attempt = 1; ; attempt += 1) {
+          const agentEventsBefore = runtime.agentEventCount;
+          try {
+            await this.dependencies.buildHarness().run(harnessContext);
+            return;
+          } catch (error) {
+            const sideEffectFree = runtime.agentEventCount === agentEventsBefore;
+            if (!sideEffectFree || attempt >= retry.attempts || abortController.signal.aborted) throw error;
+            runtime.broadcastProducedEvent({
+              type: "session.error",
+              error: {
+                type: "unknown_error",
+                message: error instanceof Error ? error.message : String(error),
+                retryStatus: "retrying",
+              },
+            });
+            runtime.broadcastProducedEvent({ type: "session.status_rescheduled" });
+            await abortableDelay(retry.delayMs(attempt), abortController.signal);
+            if (abortController.signal.aborted) throw error;
+          }
+        }
       };
       await runHarness();
       if (event.type === "user.define_outcome") {
@@ -719,4 +748,13 @@ export class DefaultNodeManagedSessionRunner
   ): Promise<void> {
     await this.subagentExecutions.get(input)?.archiveThread(input.threadId);
   }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }

@@ -243,6 +243,9 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
   readonly abortSignal?: AbortSignal;
   private readonly applicationHistoryEvents: SessionEventView[];
   private outputChain: Promise<void> = Promise.resolve();
+  /** Number of `agent.*` events (tool calls, messages, thinking) produced so far:
+   * a turn that produced none has no side effects and is safe to re-run. */
+  agentEventCount = 0;
 
   constructor(private readonly input: ManagedNodeHarnessRuntimeInput) {
     this.history = new ManagedNodeHistoryStore(
@@ -263,6 +266,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
     if (typeof frame.processed_at !== "string") {
       frame.processed_at = this.input.clock.now().toISOString();
     }
+    if (typeof frame.type === "string" && frame.type.startsWith("agent.")) this.agentEventCount += 1;
     this.history.append(frame);
     const applicationEvent = decodeRuntimeProducedSessionEvent(frame);
     if (applicationEvent !== null) {
@@ -278,6 +282,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
       processedAt: this.input.clock.now().toISOString(),
     } as RuntimeProducedSessionEvent;
     const frame = encodeRuntimeHistoryEvent(stamped) as SessionEvent;
+    if (stamped.type.startsWith("agent.")) this.agentEventCount += 1;
     this.history.append(frame);
     this.applicationHistoryEvents.push(stamped);
     void this.enqueue(frame);
