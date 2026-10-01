@@ -243,6 +243,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
   readonly abortSignal?: AbortSignal;
   private readonly applicationHistoryEvents: SessionEventView[];
   private outputChain: Promise<void> = Promise.resolve();
+  private lastStampMs = Number.NEGATIVE_INFINITY;
   /** Number of `agent.*` events (tool calls, messages, thinking) produced so far:
    * a turn that produced none has no side effects and is safe to re-run. */
   agentEventCount = 0;
@@ -264,7 +265,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
     };
     if (typeof frame.id !== "string") frame.id = this.input.ids.nextEventId();
     if (typeof frame.processed_at !== "string") {
-      frame.processed_at = this.input.clock.now().toISOString();
+      frame.processed_at = this.stamp();
     }
     if (typeof frame.type === "string" && frame.type.startsWith("agent.")) this.agentEventCount += 1;
     this.history.append(frame);
@@ -279,7 +280,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
     const stamped = {
       ...event,
       id: this.input.ids.nextEventId(),
-      processedAt: this.input.clock.now().toISOString(),
+      processedAt: this.stamp(),
     } as RuntimeProducedSessionEvent;
     const frame = encodeRuntimeHistoryEvent(stamped) as SessionEvent;
     if (stamped.type.startsWith("agent.")) this.agentEventCount += 1;
@@ -287,6 +288,15 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
     this.applicationHistoryEvents.push(stamped);
     void this.enqueue(frame);
     return stamped.id;
+  }
+
+  /** Event history is read back ordered by `processed_at` (ms precision) and
+   * then by random id, so events stamped in the same millisecond (tool_use and
+   * its tool_result) could replay out of order on another owner. Stamps are
+   * therefore strictly increasing within a runtime. */
+  private stamp(): string {
+    this.lastStampMs = Math.max(this.input.clock.now().getTime(), this.lastStampMs + 1);
+    return new Date(this.lastStampMs).toISOString();
   }
 
   getApplicationHistoryEvents(): SessionEventView[] {

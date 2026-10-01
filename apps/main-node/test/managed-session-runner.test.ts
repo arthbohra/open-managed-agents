@@ -433,13 +433,13 @@ describe("DefaultNodeManagedSessionRunner", () => {
         id: "event_runtime_02",
         type: "agent.message",
         content: [{ type: "text", text: "Hello" }],
-        processed_at: "2026-08-26T02:00:00.000Z",
+        processed_at: "2026-08-26T02:00:00.001Z",
       },
       {
         id: "event_runtime_03",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
-        processed_at: "2026-08-26T02:00:00.000Z",
+        processed_at: "2026-08-26T02:00:00.002Z",
       },
     ]);
     expect(lifecycle).toEqual(["run", "dispose", "synchronize", "idle", "afterExecution", "publicationReported"]);
@@ -587,13 +587,13 @@ describe("DefaultNodeManagedSessionRunner", () => {
           message: "final collect failed",
           retry_status: "exhausted",
         },
-        processed_at: "2026-08-26T03:15:00.000Z",
+        processed_at: "2026-08-26T03:15:00.001Z",
       },
       {
         id: "event_collect_failure_03",
         type: "session.status_idle",
         stop_reason: { type: "retries_exhausted" },
-        processed_at: "2026-08-26T03:15:00.000Z",
+        processed_at: "2026-08-26T03:15:00.002Z",
       },
     ]);
   });
@@ -681,7 +681,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         id: "event_resume_02",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
-        processed_at: "2026-08-26T03:30:00.000Z",
+        processed_at: "2026-08-26T03:30:00.001Z",
       },
     ]);
   });
@@ -797,13 +797,13 @@ describe("DefaultNodeManagedSessionRunner", () => {
         tool_use_id: toolUse.id,
         content: verdict.expectedContent,
         is_error: verdict.expectedIsError,
-        processed_at: "2026-08-26T03:45:00.000Z",
+        processed_at: "2026-08-26T03:45:00.001Z",
       },
       {
         id: "event_confirmation_03",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
-        processed_at: "2026-08-26T03:45:00.000Z",
+        processed_at: "2026-08-26T03:45:00.002Z",
       },
     ]);
   });
@@ -901,14 +901,14 @@ describe("DefaultNodeManagedSessionRunner", () => {
         type: "span.outcome_evaluation_start",
         iteration: 0,
         outcome_id: "outc_01",
-        processed_at: "2026-08-26T05:30:00.000Z",
+        processed_at: "2026-08-26T05:30:00.001Z",
       },
       {
         id: "event_outcome_03",
         type: "span.outcome_evaluation_ongoing",
         iteration: 0,
         outcome_id: "outc_01",
-        processed_at: "2026-08-26T05:30:00.000Z",
+        processed_at: "2026-08-26T05:30:00.002Z",
       },
       {
         id: "event_outcome_04",
@@ -924,13 +924,13 @@ describe("DefaultNodeManagedSessionRunner", () => {
           input_tokens: 30,
           output_tokens: 4,
         },
-        processed_at: "2026-08-26T05:30:00.000Z",
+        processed_at: "2026-08-26T05:30:00.003Z",
       },
       {
         id: "event_outcome_05",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
-        processed_at: "2026-08-26T05:30:00.000Z",
+        processed_at: "2026-08-26T05:30:00.004Z",
       },
     ]);
   });
@@ -1126,7 +1126,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         id: "event_interrupt_02",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
-        processed_at: "2026-08-26T04:00:00.000Z",
+        processed_at: "2026-08-26T04:00:00.001Z",
       },
     ]);
   });

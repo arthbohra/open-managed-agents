@@ -160,6 +160,26 @@ describe("ManagedNodeHarnessRuntime", () => {
     expect(runtime.history.getEvents()).toHaveLength(2);
   });
 
+  it("stamps events strictly increasing so same-millisecond events replay in order", async () => {
+    const { ManagedNodeHarnessRuntime } = await import("../src/lib/node-managed-harness-runtime.ts") as unknown as
+      { ManagedNodeHarnessRuntime: ManagedHarnessRuntimeConstructor };
+    const output: Array<{ type: string; processed_at: string }> = [];
+    let next = 0;
+    const runtime = new ManagedNodeHarnessRuntime({
+      initialEvents: [], events: [], sandbox: {} as SandboxExecutor,
+      output: async (frame) => { output.push(frame as { type: string; processed_at: string }); },
+      clock: { now: () => new Date("2026-08-26T01:00:00.000Z") },
+      ids: { nextEventId: () => `event_${++next}` },
+    });
+    runtime.broadcast({ type: "agent.tool_use", id: "toolu_1", name: "bash", input: {} } as SessionEvent);
+    runtime.broadcast({ type: "agent.tool_result", tool_use_id: "toolu_1", content: [] } as unknown as SessionEvent);
+    await runtime.drain();
+    expect(output.map((frame) => [frame.type, frame.processed_at])).toEqual([
+      ["agent.tool_use", "2026-08-26T01:00:00.000Z"],
+      ["agent.tool_result", "2026-08-26T01:00:00.001Z"],
+    ]);
+  });
+
   it("keeps a final system.message as mid-conversation system context", async () => {
     const modulePath = "../src/lib/node-managed-harness-runtime.ts";
     const runtimeModule = await import(/* @vite-ignore */ modulePath) as {
