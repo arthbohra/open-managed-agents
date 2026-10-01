@@ -87,13 +87,14 @@ interface DriverConstructor {
 }
 
 describe("DefaultNodeManagedSessionRuntimeDriver", () => {
-  it("projects a terminal error and idle state when sandbox startup fails", async () => {
+  function startFailureDriver(start: () => Promise<void>, accepted: string[] = []) {
     const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    let id = 0;
     const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
       engine: {
-        start: async () => { throw new Error("sprite preparation failed"); },
+        start,
         stop: async () => {},
-        accept: async () => {},
+        accept: async (input) => { accepted.push(input.sessionId); },
         archiveThread: async () => {},
       },
       realtime: new MemorySessionRealtimeHub(),
@@ -104,53 +105,49 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
         },
       }),
       clock: { now: () => new Date("2026-08-26T00:30:00.000Z") },
-      ids: {
-        nextEventId: (() => {
-          let id = 0;
-          return () => `event_start_failure_0${++id}`;
-        })(),
-      },
+      ids: { nextEventId: () => `event_start_failure_0${++id}` },
+      startRetry: { attempts: 3, delayMs: () => 0 },
     });
-
-    await expect(driver.accept({
-      workspaceId: "workspace_01",
-      sessionId: session.id,
-      session,
-      environment,
-      events: [{
-        id: "event_input_start_failure",
-        type: "user.message",
-        content: [{ type: "text", text: "Run" }],
-        processedAt: "2026-08-26T00:29:00.000Z",
-      }],
+    const accept = () => driver.accept({
+      workspaceId: "workspace_01", sessionId: session.id, session, environment,
+      events: [{ id: "event_input_start_failure", type: "user.message",
+        content: [{ type: "text", text: "Run" }], processedAt: "2026-08-26T00:29:00.000Z" }],
       executionFence,
-    })).rejects.toThrow("sprite preparation failed");
+    });
+    const events = () => projectionCalls.flatMap((call) => call.events.map((event) => {
+      const { id: _id, processedAt: _at, ...rest } = event as { id: string; processedAt: string };
+      return rest;
+    }));
+    return { accept, events, projectionCalls };
+  }
 
-    expect(projectionCalls).toEqual([
-      {
-        sessionId: "session_01",
-        events: [{
-          id: "event_start_failure_01",
-          type: "session.error",
-          error: {
-            type: "unknown_error",
-            message: "sprite preparation failed",
-            retryStatus: "terminal",
-          },
-          processedAt: "2026-08-26T00:30:00.000Z",
-        }],
-        executionFence,
-      },
-      {
-        sessionId: "session_01",
-        events: [{
-          id: "event_start_failure_02",
-          type: "session.status_idle",
-          stopReason: { type: "end_turn" },
-          processedAt: "2026-08-26T00:30:00.000Z",
-        }],
-        executionFence,
-      },
+  it("retries sandbox startup like Claude Managed Agents, then reports exhausted retries and goes idle", async () => {
+    let starts = 0;
+    const { accept, events, projectionCalls } = startFailureDriver(async () => { starts++; throw new Error("sprite preparation failed"); });
+    await expect(accept()).rejects.toThrow("sprite preparation failed");
+    expect(starts).toBe(3);
+    const retrying = { type: "session.error", error: { type: "unknown_error", message: "sprite preparation failed", retryStatus: "retrying" } };
+    expect(events()).toEqual([
+      retrying, { type: "session.status_rescheduled" },
+      retrying, { type: "session.status_rescheduled" },
+      { type: "session.error", error: { type: "unknown_error", message: "sprite preparation failed", retryStatus: "exhausted" } },
+      { type: "session.status_idle", stopReason: { type: "retries_exhausted" } },
+    ]);
+    expect(projectionCalls.every((call) => call.executionFence === executionFence || call.executionFence?.executionId === executionFence.executionId)).toBe(true);
+  });
+
+  it("recovers from a transient sandbox startup failure without going idle", async () => {
+    let starts = 0;
+    const accepted: string[] = [];
+    const { accept, events } = startFailureDriver(async () => {
+      if (++starts === 1) throw new Error("[unauthenticated] invalid username: 'user'");
+    }, accepted);
+    await accept();
+    expect(starts).toBe(2);
+    expect(accepted).toEqual([session.id]);
+    expect(events()).toEqual([
+      { type: "session.error", error: { type: "unknown_error", message: "[unauthenticated] invalid username: 'user'", retryStatus: "retrying" } },
+      { type: "session.status_rescheduled" },
     ]);
   });
 

@@ -594,7 +594,9 @@ export class DefaultNodeManagedSessionRunner
         error: {
           type: "unknown_error",
           message: error instanceof Error ? error.message : String(error),
-          retryStatus: "terminal",
+          // The turn may have produced side effects (tool calls), so it is not
+          // retried automatically: CMA semantics for a dead turn are `exhausted`.
+          retryStatus: "exhausted",
         },
       });
       throw error;
@@ -672,13 +674,13 @@ export class DefaultNodeManagedSessionRunner
             message: finalizationError instanceof Error
               ? finalizationError.message
               : String(finalizationError),
-            retryStatus: "terminal",
+            retryStatus: "exhausted",
           },
         });
       }
       runtime.broadcastProducedEvent({
         type: "session.status_idle",
-        stopReason: { type: "end_turn" },
+        stopReason: { type: runFailed || finalizationError !== undefined ? "retries_exhausted" : "end_turn" },
       });
       try {
         await runtime.drain();

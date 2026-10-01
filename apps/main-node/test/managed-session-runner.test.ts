@@ -445,7 +445,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
     expect(lifecycle).toEqual(["run", "dispose", "synchronize", "idle", "afterExecution", "publicationReported"]);
   });
 
-  it("projects a terminal session error before returning a harness failure", async () => {
+  it("reports a failed turn as exhausted (no automatic retry after agent side effects) and goes idle", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath) as {
       DefaultNodeManagedSessionRunner: RunnerConstructor;
@@ -505,20 +505,20 @@ describe("DefaultNodeManagedSessionRunner", () => {
         error: {
           type: "unknown_error",
           message: "model unavailable",
-          retry_status: "terminal",
+          retry_status: "exhausted",
         },
         processed_at: "2026-08-26T03:00:00.000Z",
       },
       {
         id: "event_error_03",
         type: "session.status_idle",
-        stop_reason: { type: "end_turn" },
+        stop_reason: { type: "retries_exhausted" },
         processed_at: "2026-08-26T03:00:00.000Z",
       },
     ]);
   });
 
-  it("projects a terminal error and idle state when fenced final collection fails", async () => {
+  it("reports a failed fenced final collection as exhausted and goes idle", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath) as {
       DefaultNodeManagedSessionRunner: RunnerConstructor;
@@ -583,14 +583,14 @@ describe("DefaultNodeManagedSessionRunner", () => {
         error: {
           type: "unknown_error",
           message: "final collect failed",
-          retry_status: "terminal",
+          retry_status: "exhausted",
         },
         processed_at: "2026-08-26T03:15:00.000Z",
       },
       {
         id: "event_collect_failure_03",
         type: "session.status_idle",
-        stop_reason: { type: "end_turn" },
+        stop_reason: { type: "retries_exhausted" },
         processed_at: "2026-08-26T03:15:00.000Z",
       },
     ]);

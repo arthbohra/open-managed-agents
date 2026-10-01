@@ -94,6 +94,12 @@ export interface DefaultNodeManagedSessionRuntimeDriverDependencies {
   ): SessionRuntimeProjectionApplicationPort;
   clock?: { now(): Date };
   ids?: { nextEventId(): string };
+  /** Like Claude Managed Agents, startup failures (sandbox acquisition,
+   * workspace restore, input staging) are retried by the server while the
+   * execution lease is held: `session.error` with retry_status `retrying`
+   * plus `session.status_rescheduled`, then `exhausted` and an idle session
+   * with `retries_exhausted`. Startup has produced no agent side effects. */
+  startRetry?: { attempts: number; delayMs(attempt: number): number };
 }
 
 export interface NodeManagedSessionRunnerAcceptInput
@@ -277,18 +283,30 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
     if (fence !== undefined) this.executionFences.set(input, fence);
     try {
-      try {
-        await this.start({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          session: input.session,
-          environment: input.environment,
-          initialEvents: [],
-          ...(fence !== undefined && { executionFence: fence }),
-        });
-      } catch (error) {
-        await this.projectTerminalStartFailure(input, error);
-        throw error;
+      const retry = this.dependencies.startRetry ?? {
+        attempts: 3,
+        delayMs: (attempt: number) => Math.min(30_000, 2_000 * 2 ** (attempt - 1)),
+      };
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await this.start({
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            session: input.session,
+            environment: input.environment,
+            initialEvents: [],
+            ...(fence !== undefined && { executionFence: fence }),
+          });
+          break;
+        } catch (error) {
+          if (attempt >= Math.max(1, retry.attempts)) {
+            await this.projectStartFailure(input, error, "exhausted");
+            throw error;
+          }
+          await this.projectStartFailure(input, error, "retrying");
+          const delay = retry.delayMs(attempt);
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        }
       }
       const { executionFence: _executionFence, ...accepted } = input;
       await this.dependencies.engine.accept({
@@ -303,9 +321,10 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
   }
 
-  private async projectTerminalStartFailure(
+  private async projectStartFailure(
     input: ExecuteNodeManagedSessionEvents,
     error: unknown,
+    retryStatus: "retrying" | "exhausted",
   ): Promise<void> {
     const processedAt = (this.dependencies.clock?.now() ?? new Date()).toISOString();
     const nextEventId = () => this.dependencies.ids?.nextEventId()
@@ -319,7 +338,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
         error: {
           type: "unknown_error",
           message: error instanceof Error ? error.message : String(error),
-          retry_status: "terminal",
+          retry_status: retryStatus,
         },
         processed_at: processedAt,
       },
@@ -328,15 +347,18 @@ export class DefaultNodeManagedSessionRuntimeDriver
     await this.enqueueOutput(
       input.workspaceId,
       input.sessionId,
-      {
-        id: nextEventId(),
-        type: "session.status_idle",
-        stop_reason: { type: "end_turn" },
-        processed_at: processedAt,
-      },
+      retryStatus === "retrying"
+        ? { id: nextEventId(), type: "session.status_rescheduled", processed_at: processedAt }
+        : {
+            id: nextEventId(),
+            type: "session.status_idle",
+            stop_reason: { type: "retries_exhausted" },
+            processed_at: processedAt,
+          },
       input.executionFence,
     );
   }
+
 
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void> {
     return this.dependencies.engine.archiveThread(input);
