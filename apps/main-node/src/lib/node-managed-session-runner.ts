@@ -120,7 +120,7 @@ export interface ManagedNodeOutcomeEvaluationPort {
 export interface DefaultNodeManagedSessionRunnerDependencies {
   /**
    * In-place retry of a harness failure while the turn has produced no
-   * `agent.*` event (e.g. the model call failed before any output). Each
+   * `agent.*` event (e.g. the model call failed before producing output). Each
    * retry emits `session.error{retrying}` + `session.status_rescheduled`.
    * Default: 3 attempts, backoff min(30s, 2s * 2^(n-1)).
    */
