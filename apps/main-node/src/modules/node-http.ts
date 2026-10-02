@@ -735,24 +735,16 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
       if (!page.ok) return c.json({ error: unifiedPageErrorMessage(page.error) }, 400);
       return c.json(unifiedPageHttpBody(page));
     }
-    const beforeId = c.req.query("before_id");
-    const afterId = c.req.query("after_id");
-    const order = c.req.query("order") === "asc" ? "asc" : "desc";
+    // Unscoped lists stay on the pre-existing Node contract: one page,
+    // `has_more: false`, and `before_id` / `after_id` / `order` / `cursor`
+    // are ignored. Cloudflare's unscoped route still honors those params;
+    // do not "align" this branch without a client that pages it.
     const rows = await filesService.list({
       tenantId: t,
       sessionId: scopeId,
-      beforeId,
-      afterId,
-      order,
-      limit: requested + 1,
+      limit: requested,
     });
-    const slice = rows.slice(0, requested);
-    return c.json({
-      data: slice.map(toFileRecord),
-      has_more: rows.length > requested,
-      first_id: slice[0]?.id,
-      last_id: slice[slice.length - 1]?.id,
-    });
+    return c.json({ data: rows.map(toFileRecord), has_more: false });
   });
   v1.get("/oma/files/:id/content", async (c) => {
     const id = c.req.param("id");

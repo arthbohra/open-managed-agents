@@ -94,6 +94,64 @@ describe("unified session file page (Cloudflare D1 + R2)", () => {
     }
     expect(seen).toEqual(expected);
   });
+
+  it("keeps unscoped before_id on lexicographic ids and ignores cursor", async () => {
+    const newer = await upload("compat-newer.txt");
+    const older = await upload("compat-older.txt");
+    const [low, high] = [newer.id, older.id].sort((a, b) => (a < b ? -1 : 1));
+
+    const underHigh = await listUnscoped({ beforeId: high, limit: 1000 });
+    expect(underHigh.status).toBe(200);
+    expect(underHigh.body.next_cursor).toBeUndefined();
+    expect(underHigh.body.data.map((row) => row.id)).toContain(low);
+    expect(underHigh.body.data.map((row) => row.id)).not.toContain(high);
+
+    const underLow = await listUnscoped({ beforeId: low, limit: 1000 });
+    expect(underLow.body.data.map((row) => row.id)).not.toContain(high);
+    expect(underLow.body.data.map((row) => row.id)).not.toContain(low);
+
+    const plain = await listUnscoped({ limit: 1000 });
+    const withCursor = await listUnscoped({ limit: 1000, cursor: "fcur1.not-a-cursor" });
+    expect(withCursor.status).toBe(200);
+    expect(withCursor.body.data.map((row) => row.id)).toEqual(plain.body.data.map((row) => row.id));
+    expect(withCursor.body.has_more).toBe(plain.body.has_more);
+    expect(withCursor.body.next_cursor).toBeUndefined();
+  });
+
+  it("pages a scoped list with before_id=last_id and never reads cursor", async () => {
+    const sessionId = `sess_d1only_${crypto.randomUUID().slice(0, 8)}`;
+    const uploaded = [
+      await upload("one.txt", sessionId),
+      await upload("two.txt", sessionId),
+      await upload("three.txt", sessionId),
+    ];
+    const seen: string[] = [];
+    let beforeId: string | undefined;
+    for (let i = 0; i < uploaded.length + 1; i++) {
+      const url = new URL("http://localhost/v1/oma/files");
+      url.searchParams.set("scope_id", sessionId);
+      url.searchParams.set("limit", "1");
+      if (beforeId) url.searchParams.set("before_id", beforeId);
+      const res = await exports.default.fetch(new Request(url, { headers: H }));
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        data: Array<{ id: string }>;
+        has_more: boolean;
+        last_id?: string;
+      };
+      if (body.data.length === 0) {
+        expect(body.has_more).toBe(false);
+        break;
+      }
+      expect(body.data).toHaveLength(1);
+      seen.push(body.data[0]!.id);
+      if (!body.has_more) break;
+      expect(body.last_id).toBe(body.data[0]!.id);
+      beforeId = body.last_id;
+    }
+    expect(seen.sort()).toEqual(uploaded.map((file) => file.id).sort());
+    expect(new Set(seen).size).toBe(uploaded.length);
+  });
 });
 
 function createCfHarness(): UnifiedPageHarness {
@@ -141,6 +199,36 @@ function createCfHarness(): UnifiedPageHarness {
         afterId: input.afterId,
       });
     },
+  };
+}
+
+async function upload(filename: string, scopeId?: string): Promise<{ id: string }> {
+  const res = await exports.default.fetch(new Request("http://localhost/v1/oma/files", {
+    method: "POST",
+    headers: { ...H, "content-type": "application/json" },
+    body: JSON.stringify({
+      filename,
+      content: filename,
+      media_type: "text/plain",
+      ...(scopeId ? { scope_id: scopeId } : {}),
+    }),
+  }));
+  expect(res.status).toBe(201);
+  return await res.json() as { id: string };
+}
+
+async function listUnscoped(input: { beforeId?: string; limit: number; cursor?: string }): Promise<{
+  status: number;
+  body: { data: Array<{ id: string }>; has_more: boolean; next_cursor?: string };
+}> {
+  const url = new URL("http://localhost/v1/oma/files");
+  url.searchParams.set("limit", String(input.limit));
+  if (input.beforeId) url.searchParams.set("before_id", input.beforeId);
+  if (input.cursor) url.searchParams.set("cursor", input.cursor);
+  const res = await exports.default.fetch(new Request(url, { headers: H }));
+  return {
+    status: res.status,
+    body: await res.json() as { data: Array<{ id: string }>; has_more: boolean; next_cursor?: string },
   };
 }
 
