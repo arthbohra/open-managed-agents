@@ -169,18 +169,25 @@ pnpm test
 | `pnpm dev:docs` | 文档站，`http://localhost:4321` |
 | `docker compose up -d` | Node 自部署。先按 README 准备 `.env` |
 
-提交前跑 `pnpm typecheck`，以及改过的包的测试。动到公共路径就跑 `pnpm test`。`pnpm test` 不包含 CI 里随后的四步：Console agent editor E2E、protocol coverage、storage、MySQL。E2E 需要 Playwright；storage 和 MySQL 需要 Docker。
+提交前跑 `pnpm typecheck`，以及改过的包的测试。动到公共路径就跑 `pnpm test`。`pnpm test` 不包含 CI 里随后的 Console agent editor E2E、protocol coverage、storage、MySQL。E2E 需要 Playwright；storage 和 MySQL 需要 Docker。MySQL 之前还有一步把 `/dev/kvm` 交给 runner 用户，见下。
 
-Workflow `CI`（`.github/workflows/ci.yml`，PR 与 `main`，job `verify`，超时 30 分钟）的顺序：
+Workflow `CI`（`.github/workflows/ci.yml`，PR 与 `main`，job `verify`，`runs-on: ubuntu-latest`，超时 30 分钟）的顺序：
 
 1. `pnpm typecheck`
 2. `pnpm test`
 3. 安装 Playwright Chromium，然后 `pnpm test:e2e:agent-editor`
 4. `pnpm test:coverage:protocol`
 5. `pnpm test:integration:storage` — Testcontainers + MinIO（Chainguard 镜像，#227）
-6. `pnpm test:integration:mysql` — Testcontainers `mysql:8.4`（`apps/main-node/vitest.mysql.config.ts`）
+6. `Enable KVM for Litebox`
+7. `pnpm test:integration:mysql` — Testcontainers `mysql:8.4`（`apps/main-node/vitest.mysql.config.ts`）。最近一次跑完这一步的 main CI 是 [#237 的 run 36998373962](https://github.com/openma-ai/open-managed-agents/actions/runs/36998373962)（head `0d5c5f00`）：**2 files / 16 tests**。`test/persistence.mysql.integration.ts` 6 tests，`test/main-node.mysql.integration.ts` 10 tests。#239 没有改 `ci.yml` 或这两个文件。
 
-**KVM。** Actions 里没有 KVM job，`ubuntu-latest` 也不提供 `/dev/kvm`。`packages/sandbox-adapter-litebox` 的单测 mock 了 `@boxlite-ai/boxlite`，这是测试替身。真实 litebox 需要带 `/dev/kvm` 的 Linux，或 macOS Hypervisor.framework。boxrun 是另一台有 KVM 的机器跑 `boxlite serve`，OMA 进程本身可以没有 KVM。改这条路径却没在这种机器上跑过时，写进「未验证的部分」。
+**KVM。** 步骤注释写明：ubuntu-24.04 runner 上有 `/dev/kvm`，属主 `root:kvm`，模式 `0660`，runner 用户不在 `kvm` 组。`Enable KVM for Litebox` 在 MySQL 之前执行。设备不存在就报错并让 job 失败，MySQL 不会跑。它写入 udev 规则，再 `chmod 666 /dev/kvm`。`chmod` 失败，或当前用户最终不是既可读又可写，同样失败。
+
+`pnpm test:integration:mysql` 里，`apps/main-node/test/persistence.mysql.integration.ts` 的 “runs official /v1/sessions on two real Node owners…”（#237）会启动两个真实 Node owner，`SANDBOX_PROVIDER=litebox`。在 Linux 上它要求 `/dev/kvm` 可读可写，跑的是真实 Litebox microVM。这不是 Haven，不是托管环境，也不是 boxrun（另一台机器上的 `boxlite serve`）。同一文件里其余用例是 MySQL + MinIO 上的独立 actor 进程，不起 microVM。`main-node.mysql.integration.ts` 把被测服务的 `OPENMA_TEST_SANDBOX_PROVIDER` 设为 `local-subprocess`，也不是 Litebox。
+
+`packages/sandbox-adapter-litebox` 的单测仍然 `vi.mock("@boxlite-ai/boxlite")`，不打开 `/dev/kvm`。`pnpm test` 里这份通过，不能当成 microVM 已经跑过。
+
+`Release` 的 `version-pr` 也会跑 `pnpm test:integration:mysql`，那个 workflow 里没有 `Enable KVM for Litebox`。
 
 | Workflow | 何时跑 | Job |
 |---|---|---|
