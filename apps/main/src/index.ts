@@ -147,7 +147,7 @@ import {
   EnvironmentAwareSessionLifecycleRouter,
   ingestEnvironmentWorkRuntimeEvents,
   TimerEnvironmentWorkAvailabilityWaiter,
-  IndeterminateCredentialValidationProbe,
+  McpOAuthCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
   ManagedMemorySnapshotMaterializer,
@@ -564,7 +564,7 @@ function managedVaultsPortFor(context: AppCtx) {
 
 const managedVaultsRoutes = buildManagedVaultRoutes(context => managedVaultsPortFor(context as AppCtx));
 
-const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
+const managedCredentialValidation = new McpOAuthCredentialValidationProbe();
 function managedCredentialsPortFor(context: AppCtx) {
   const request = context.var as {
     tenant_id: string;
