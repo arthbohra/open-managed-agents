@@ -11,6 +11,7 @@ import {
   SqlSessionExecutionCoordinator,
 } from "@open-managed-agents/session-runtime-sql/coordination";
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
+import { ConnectionLost, Deadlock } from "@open-managed-agents/sql-client/db-errors";
 import {
   NodeSessionExecutionWorker,
   type NodeSessionExecutionRuntime,
@@ -334,6 +335,67 @@ describe("NodeSessionExecutionWorker", () => {
       workspaceId: "workspace_01",
       executionId: "event_01",
     })).resolves.toMatchObject({ state: "completed" });
+  });
+
+  it("supervised fibers keep a turn alive across deadlock and connection loss", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on("unhandledRejection", onRejection);
+    let release: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => { release = resolve; });
+    const backgroundErrors: Error[] = [];
+    let renews = 0;
+    runtime.run = async (input) => {
+      runs.push(structuredClone(input));
+      await running;
+    };
+    const executor = worker("node_fiber", {
+      heartbeatIntervalMs: 5,
+      leaseTtlMs: 30_000,
+      onError: (error) => backgroundErrors.push(error),
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        claim: coordinator.claim.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        settle: coordinator.settle.bind(coordinator),
+        renew: async () => {
+          renews += 1;
+          if (renews === 1) {
+            throw new Deadlock({
+              op: "session_execution.renew",
+              sessionId: session.id,
+              cause: new Error("1213"),
+            });
+          }
+          throw new ConnectionLost({
+            op: "session_execution.renew",
+            sessionId: session.id,
+            cause: new Error("ECONNRESET"),
+          });
+        },
+      },
+    });
+    try {
+      await executor.sessionEventsAccepted(accepted("event_fiber"));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renews).toBeGreaterThan(0);
+      expect(cancellations).not.toContain("lease_lost");
+      expect(rejections).toEqual([]);
+      expect(backgroundErrors.map((error) => (error as { _tag?: string })._tag)).toEqual(
+        expect.arrayContaining(["Deadlock", "ConnectionLost"]),
+      );
+      release?.();
+      await executor.waitForIdle();
+      await expect(coordinator.find({
+        workspaceId: "workspace_01",
+        executionId: "event_fiber",
+      })).resolves.toMatchObject({ state: "completed" });
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
   });
 
   it("self-fences when a database partition leaves renewal hanging", async () => {

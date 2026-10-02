@@ -16,6 +16,17 @@ import {
   withDbBoundary,
 } from "@open-managed-agents/sql-client/db-errors";
 import type { SqlClient } from "@open-managed-agents/sql-client";
+import { Cause, Effect, Exit, Option } from "effect";
+
+/** Promise port over an Effect program. FiberFailure stays inside. */
+function runCoordinatorPort<A>(effect: Effect.Effect<A, unknown>): Promise<A> {
+  return Effect.runPromiseExit(effect).then((exit) => {
+    if (Exit.isSuccess(exit)) return exit.value;
+    const failure = Cause.failureOption(exit.cause);
+    if (Option.isSome(failure)) throw failure.value;
+    throw Cause.squash(exit.cause);
+  });
+}
 
 const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS managed_session_executions (
@@ -395,13 +406,16 @@ export class SqlSessionExecutionStore
       : { type: "conflict", execution };
   }
 
-  async claim(
+  claim(
     input: ClaimSessionExecution,
   ): Promise<ClaimSessionExecutionResult> {
-    return withDbBoundary({
-      op: "session_execution.claim",
-      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
-    }, () => this.claimWithCasRetries(input));
+    return runCoordinatorPort(Effect.tryPromise({
+      try: () => withDbBoundary({
+        op: "session_execution.claim",
+        ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+      }, () => this.claimWithCasRetries(input)),
+      catch: (error: unknown) => error,
+    }));
   }
 
   /**
@@ -625,12 +639,13 @@ export class SqlSessionExecutionStore
     return row === null ? null : this.claimedResult(row);
   }
 
-  async renew(input: {
+  renew(input: {
     fence: SessionExecutionFence;
     renewedAt: string;
     leaseTtlMs: number;
   }): Promise<RenewSessionExecutionResult> {
-    return withDbBoundary({
+    return runCoordinatorPort(Effect.tryPromise({
+      try: () => withDbBoundary({
       op: "session_execution.renew",
       sessionId: input.fence.sessionId,
     }, async () => {
@@ -666,16 +681,19 @@ export class SqlSessionExecutionStore
             fence: toFence(row),
             interruptRequestedAt: toExecution(row).interruptRequestedAt,
           };
-    });
+    }),
+      catch: (error: unknown) => error,
+    }));
   }
 
-  async settle(input: {
+  settle(input: {
     fence: SessionExecutionFence;
     settledAt: string;
     outcome: "completed" | "failed" | "cancelled";
     failure?: string;
   }): Promise<SettleSessionExecutionResult> {
-    return withDbBoundary({
+    return runCoordinatorPort(Effect.tryPromise({
+      try: () => withDbBoundary({
       op: "session_execution.settle",
       sessionId: input.fence.sessionId,
     }, async () => {
@@ -726,7 +744,9 @@ export class SqlSessionExecutionStore
         return { type: "settled" as const, execution: current };
       }
       return { type: "lost" as const };
-    });
+    }),
+      catch: (error: unknown) => error,
+    }));
   }
 
   async requestInterrupt(input: {
