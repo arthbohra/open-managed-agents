@@ -338,6 +338,44 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       return { stub, runtimeId: rid, userId: uid };
     }
 
+    // Accept the client socket and wait until the DO has finished
+    // webSocketClose. Dropping the upgrade Response leaves the server socket
+    // alive until the vitest worker tears the file down; that close logs
+    // "harness closed" via console.log, and the onUserConsoleLog RPC is still
+    // pending when the worker closes.
+    async function attachHarnessClient(stub, sessionId: string, tenantId: string) {
+      const response = await stub.fetch(new Request("http://runtime-room/_attach_harness", {
+        headers: {
+          Upgrade: "websocket",
+          "x-attach-role": "harness",
+          "x-session-id": sessionId,
+          "x-harness-tenant": tenantId,
+        },
+      }));
+      return response;
+    }
+
+    async function releaseHarnessSocket(stub, response, sessionId: string) {
+      const socket = response.webSocket;
+      if (!socket) throw new Error("harness attach did not return a websocket");
+      // workerd reports the client socket OPEN before accept(), and close()
+      // sends a frame, so accept() has to run first. A second accept() throws.
+      try {
+        socket.accept();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/already accepted/i.test(message)) throw error;
+      }
+      if (socket.readyState !== WebSocket.CLOSED) socket.close(1000, "test finished");
+      await vi.waitFor(async () => {
+        let open = -1;
+        await runInDurableObject(stub, async (instance) => {
+          open = instance.ctx.getWebSockets(`harness:${sessionId}`).length;
+        });
+        expect(open).toBe(0);
+      });
+    }
+
     it("persists ordered runner output before acknowledging and deduplicates reconnect replay", async () => {
       const { stub } = await freshRoom(["tn_delivery", "tn_other"]);
       await runInDurableObject(stub, async (room, state) => {
@@ -403,7 +441,9 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       try {
         await vi.waitFor(() => expect(frames.filter((frame) => frame.delivery).map((frame) => frame.delivery.seq)).toEqual([4, 5]), { timeout: 1000 });
         expect(frames[0]).toMatchObject({ type: "attached", capabilities: ["durable_session_events_v1"] });
-      } finally { response.webSocket.close(); }
+      } finally {
+        await releaseHarnessSocket(stub, response, "replay-session");
+      }
       // The pin belongs to the task, and must survive closing its observer.
       const wrong = await stub.fetch(new Request("http://runtime-room/_attach_harness", { headers: {
         Upgrade: "websocket", "x-attach-role": "harness", "x-session-id": "replay-session", "x-harness-tenant": "tn_wrong_replay",
@@ -773,18 +813,11 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       const { stub } = await freshRoom(["tn_pin_a", "tn_pin_b"]);
       const sid = `sess_pin_${Math.random().toString(36).slice(2, 6)}`;
       // Pin the session by issuing a real attachHarness request — that's the
-      // public path that populates #sessionTenant. The WebSocket upgrade
-      // returns a client we discard; we just need the pin side-effect.
-      await stub.fetch(
-        new Request("http://runtime-room/_attach_harness", {
-          headers: {
-            Upgrade: "websocket",
-            "x-attach-role": "harness",
-            "x-session-id": sid,
-            "x-harness-tenant": "tn_pin_a",
-          },
-        }),
-      );
+      // public path that populates #sessionTenant. Close the client before
+      // the test returns so webSocketClose logs while this worker is alive.
+      const attached = await attachHarnessClient(stub, sid, "tn_pin_a");
+      expect(attached.status).toBe(101);
+      await releaseHarnessSocket(stub, attached, sid);
 
       await runInDurableObject(stub, async (instance, state) => {
         await (instance as unknown as {
@@ -805,16 +838,9 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       const { stub } = await freshRoom(["tn_inj"]);
       const sid = `sess_inj_${Math.random().toString(36).slice(2, 6)}`;
       // Public path: real attach with x-harness-tenant → pin populated.
-      await stub.fetch(
-        new Request("http://runtime-room/_attach_harness", {
-          headers: {
-            Upgrade: "websocket",
-            "x-attach-role": "harness",
-            "x-session-id": sid,
-            "x-harness-tenant": "tn_inj",
-          },
-        }),
-      );
+      const attached = await attachHarnessClient(stub, sid, "tn_inj");
+      expect(attached.status).toBe(101);
+      await releaseHarnessSocket(stub, attached, sid);
 
       const collected: Array<Record<string, unknown>> = [];
       await runInDurableObject(stub, async (instance) => {
