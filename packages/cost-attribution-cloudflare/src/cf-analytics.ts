@@ -8,6 +8,7 @@ import type {
 import {
   CostAttributionError,
   costAttributionProviderError,
+  validateCostPeriod,
 } from "@open-managed-agents/cost-attribution";
 import {
   fetchCloudflareBillableUsage,
@@ -20,7 +21,7 @@ const CF_GQL = "https://api.cloudflare.com/client/v4/graphql";
 export interface CfPricing {
   workers: { requests: number; cpu_ms: number };
   durable_objects: { requests: number; duration_gb_s: number; sql_read: number; sql_write: number; storage_gb: number };
-  kv: { read: number; write: number; storage_gb: number };
+  kv: { read: number; write: number; delete: number; list: number; storage_gb: number };
   r2: { class_a: number; class_b: number; storage_gb: number };
   d1: { read: number; write: number; storage_gb: number };
   workers_ai: { neurons: number };
@@ -31,7 +32,7 @@ export interface CfPricing {
 export interface CfIncluded {
   workers: { requests: number; cpu_ms: number };
   durable_objects: { requests: number; duration_gb_s: number; sql_read: number; sql_write: number; storage_gb: number };
-  kv: { read: number; write: number; storage_gb: number };
+  kv: { read: number; write: number; delete: number; list: number; storage_gb: number };
   r2: { class_a: number; class_b: number; storage_gb: number };
   d1: { read: number; write: number; storage_gb: number };
   browser_rendering: { hours: number };
@@ -41,7 +42,7 @@ export interface CfIncluded {
 export const DEFAULT_PRICING: CfPricing = {
   workers: { requests: 0.30, cpu_ms: 0.02 },
   durable_objects: { requests: 0.15, duration_gb_s: 12.50, sql_read: 0.001, sql_write: 1.00, storage_gb: 0.20 },
-  kv: { read: 0.50, write: 5.00, storage_gb: 0.50 },
+  kv: { read: 0.50, write: 5.00, delete: 5.00, list: 5.00, storage_gb: 0.50 },
   r2: { class_a: 4.50, class_b: 0.36, storage_gb: 0.015 },
   d1: { read: 0.001, write: 1.00, storage_gb: 0.75 },
   workers_ai: { neurons: 0.011 },
@@ -52,7 +53,7 @@ export const DEFAULT_PRICING: CfPricing = {
 export const INCLUDED: CfIncluded = {
   workers: { requests: 10_000_000, cpu_ms: 30_000_000 },
   durable_objects: { requests: 1_000_000, duration_gb_s: 400_000, sql_read: 25_000_000_000, sql_write: 50_000_000, storage_gb: 5 },
-  kv: { read: 10_000_000, write: 1_000_000, storage_gb: 1 },
+  kv: { read: 10_000_000, write: 1_000_000, delete: 1_000_000, list: 1_000_000, storage_gb: 1 },
   r2: { class_a: 1_000_000, class_b: 10_000_000, storage_gb: 10 },
   d1: { read: 25_000_000_000, write: 50_000_000, storage_gb: 5 },
   browser_rendering: { hours: 10 },
@@ -102,6 +103,41 @@ function overageCostPerM(used: number, included: number, pricePerM: number): num
   return (overage(used, included) / 1_000_000) * pricePerM;
 }
 
+/** Quote a value for an inline GraphQL string literal. */
+function graphqlQuoted(value: string): string {
+  return `"${value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")}"`;
+}
+
+function requireUsage(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`Cloudflare Analytics field ${label} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function optionalUsage(value: unknown, label: string): number {
+  if (value == null) return 0;
+  return requireUsage(value, label);
+}
+
+function peakUsage(values: unknown[], label: string): number {
+  let peak = 0;
+  for (const value of values) peak = Math.max(peak, requireUsage(value, label));
+  return peak;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw costAttributionProviderError(
+    "cloudflare",
+    signal.reason ?? new DOMException("The operation was aborted", "AbortError"),
+  );
+}
+
 interface GqlResponse<T = unknown> {
   data?: { viewer?: { accounts?: T[] } };
   errors?: Array<{ message: string }>;
@@ -129,6 +165,14 @@ async function gql<T>(
 }
 
 export function recentCostPeriod(days: number, now = new Date()): CostPeriod {
+  if (!Number.isFinite(days)) {
+    throw new CostAttributionError({
+      code: "invalid_query",
+      provider: "cloudflare",
+      message: "Cost report days must be a finite number",
+      retryable: false,
+    });
+  }
   const normalizedDays = Math.max(1, Math.trunc(days));
   const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const start = new Date(end.getTime() - (normalizedDays - 1) * 86_400_000);
@@ -147,36 +191,69 @@ export interface ServiceCost {
   cost: number | null;
   status?: "available" | "unavailable";
   breakdown?: Array<Record<string, unknown>>;
+  /** Present when a priced metric could not be measured from the dataset. */
+  warnings?: string[];
 }
 
 async function queryWorkers(acct: string, token: string, period: CostPeriod, pricing: CfPricing, fetcher: typeof fetch): Promise<ServiceCost> {
   const { start, end } = period;
   const data = await gql<{
-    workersInvocationsAdaptive: Array<{ sum: { requests: number; errors: number; subrequests: number }; quantiles: { cpuTimeP50: number; cpuTimeP99: number }; dimensions: { scriptName: string } }>;
-  }>(acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { workersInvocationsAdaptive(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests errors subrequests } quantiles { cpuTimeP50 cpuTimeP99 } dimensions { scriptName } } } } }`, fetcher);
+    workersInvocationsAdaptive: Array<{
+      sum?: { requests?: number; errors?: number; subrequests?: number };
+      quantiles?: { cpuTimeP50?: number; cpuTimeP99?: number };
+      dimensions?: { scriptName?: string };
+    }>;
+  }>(acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { workersInvocationsAdaptive(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests errors subrequests } quantiles { cpuTimeP50 cpuTimeP99 } dimensions { scriptName } } } } }`, fetcher);
 
   const rows = data?.workersInvocationsAdaptive ?? [];
-  const requests = rows.reduce((s, r) => s + r.sum.requests, 0);
-  const errors = rows.reduce((s, r) => s + r.sum.errors, 0);
+  let requests = 0;
+  let errors = 0;
+  let cpuMs = 0;
+  let cpuUnmetered = false;
+  const byScript = new Map<string, { requests: number; errors: number; cpu_ms: number; cpuP50: number; cpuP99: number }>();
+  for (const row of rows) {
+    const rowRequests = requireUsage(row.sum?.requests, "workers.requests");
+    const rowErrors = optionalUsage(row.sum?.errors, "workers.errors");
+    // Subrequests are included in the dataset but are not a billed Workers request.
+    if (row.sum && "subrequests" in row.sum && row.sum.subrequests != null) {
+      requireUsage(row.sum.subrequests, "workers.subrequests");
+    }
+    requests += rowRequests;
+    errors += rowErrors;
 
-  const byScript = new Map<string, { requests: number; errors: number; cpuP50: number; cpuP99: number }>();
-  for (const r of rows) {
-    const key = r.dimensions.scriptName;
-    const prev = byScript.get(key) ?? { requests: 0, errors: 0, cpuP50: 0, cpuP99: 0 };
-    prev.requests += r.sum.requests;
-    prev.errors += r.sum.errors;
-    prev.cpuP50 = Math.max(prev.cpuP50, r.quantiles.cpuTimeP50);
-    prev.cpuP99 = Math.max(prev.cpuP99, r.quantiles.cpuTimeP99);
+    const key = row.dimensions?.scriptName ?? "";
+    const prev = byScript.get(key) ?? { requests: 0, errors: 0, cpu_ms: 0, cpuP50: 0, cpuP99: 0 };
+    prev.requests += rowRequests;
+    prev.errors += rowErrors;
+
+    // cpuTimeP50 is microseconds. The adaptive dataset has no summable CPU
+    // total, so CPU-ms is estimated as requests × median for each group.
+    const p50 = row.quantiles?.cpuTimeP50;
+    if (typeof p50 === "number" && Number.isFinite(p50) && p50 >= 0) {
+      const rowCpuMs = (rowRequests * p50) / 1000;
+      cpuMs += rowCpuMs;
+      prev.cpu_ms += rowCpuMs;
+      prev.cpuP50 = Math.max(prev.cpuP50, p50);
+    } else if (rowRequests > 0) {
+      cpuUnmetered = true;
+    }
+    const p99 = row.quantiles?.cpuTimeP99;
+    if (typeof p99 === "number" && Number.isFinite(p99) && p99 >= 0) {
+      prev.cpuP99 = Math.max(prev.cpuP99, p99);
+    }
     byScript.set(key, prev);
   }
 
+  const requestCost = overageCostPerM(requests, INCLUDED.workers.requests, pricing.workers.requests);
+  const cpuCost = overageCostPerM(cpuMs, INCLUDED.workers.cpu_ms, pricing.workers.cpu_ms);
   return {
-    usage: { requests, errors },
-    included: { requests: INCLUDED.workers.requests },
-    cost: overageCostPerM(requests, INCLUDED.workers.requests, pricing.workers.requests),
+    usage: { requests, errors, cpu_ms: cpuMs },
+    included: { requests: INCLUDED.workers.requests, cpu_ms: INCLUDED.workers.cpu_ms },
+    cost: cpuUnmetered ? requestCost : requestCost + cpuCost,
+    ...(cpuUnmetered ? { warnings: ["analytics_metric_unmetered:workers.cpu_ms"] } : {}),
     breakdown: [...byScript.entries()]
       .sort((a, b) => b[1].requests - a[1].requests)
-      .map(([script, v]) => ({ script, ...v })),
+      .map(([script, value]) => ({ script, ...value })),
   };
 }
 
@@ -184,20 +261,38 @@ async function queryDurableObjects(acct: string, token: string, period: CostPeri
   const { start, end } = period;
   const [inv, periodic, storage, sql] = await Promise.all([
     gql<{ durableObjectsInvocationsAdaptiveGroups: Array<{ sum: { requests: number }; dimensions: { objectName: string } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { durableObjectsInvocationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { objectName } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { durableObjectsInvocationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { objectName } } } } }`, fetcher),
     gql<{ durableObjectsPeriodicGroups: Array<{ sum: { cpuTime: number }; max: { wallTime: number; activeTime: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { durableObjectsPeriodicGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { cpuTime } max { wallTime activeTime } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { durableObjectsPeriodicGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { cpuTime } max { wallTime activeTime } } } } }`, fetcher),
     gql<{ durableObjectsStorageGroups: Array<{ max: { storedBytes: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { durableObjectsStorageGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { max { storedBytes } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { durableObjectsStorageGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { max { storedBytes } } } } }`, fetcher),
     gql<{ durableObjectsSqlStorageGroups: Array<{ sum: { rowsRead: number; rowsWritten: number }; max: { databaseSizeBytes: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { durableObjectsSqlStorageGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { rowsRead rowsWritten } max { databaseSizeBytes } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { durableObjectsSqlStorageGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { rowsRead rowsWritten } max { databaseSizeBytes } } } } }`, fetcher),
   ]);
 
-  const requests = inv?.durableObjectsInvocationsAdaptiveGroups?.reduce((s, r) => s + r.sum.requests, 0) ?? 0;
-  const sqlReads = sql?.durableObjectsSqlStorageGroups?.reduce((s, r) => s + r.sum.rowsRead, 0) ?? 0;
-  const sqlWrites = sql?.durableObjectsSqlStorageGroups?.reduce((s, r) => s + r.sum.rowsWritten, 0) ?? 0;
-  const storageBytes = Math.max(...(storage?.durableObjectsStorageGroups?.map(r => r.max.storedBytes) ?? [0]), 0);
-  const sqlSizeBytes = Math.max(...(sql?.durableObjectsSqlStorageGroups?.map(r => r.max.databaseSizeBytes) ?? [0]), 0);
+  // Periodic groups expose CPU time and max wall/active time, not billable
+  // GB-seconds, so duration_gb_s is not priced from this dataset.
+  void periodic;
+  const requests = (inv?.durableObjectsInvocationsAdaptiveGroups ?? []).reduce(
+    (sum, row) => sum + requireUsage(row.sum?.requests, "durable_objects.requests"),
+    0,
+  );
+  const sqlReads = (sql?.durableObjectsSqlStorageGroups ?? []).reduce(
+    (sum, row) => sum + requireUsage(row.sum?.rowsRead, "durable_objects.sql_reads"),
+    0,
+  );
+  const sqlWrites = (sql?.durableObjectsSqlStorageGroups ?? []).reduce(
+    (sum, row) => sum + requireUsage(row.sum?.rowsWritten, "durable_objects.sql_writes"),
+    0,
+  );
+  const storageBytes = peakUsage(
+    (storage?.durableObjectsStorageGroups ?? []).map((row) => row.max?.storedBytes),
+    "durable_objects.storedBytes",
+  );
+  const sqlSizeBytes = peakUsage(
+    (sql?.durableObjectsSqlStorageGroups ?? []).map((row) => row.max?.databaseSizeBytes),
+    "durable_objects.databaseSizeBytes",
+  );
   const storedGB = (storageBytes + sqlSizeBytes) / (1024 ** 3);
 
   const cost =
@@ -217,54 +312,174 @@ async function queryKV(acct: string, token: string, period: CostPeriod, pricing:
   const { start, end } = period;
   const [ops, store] = await Promise.all([
     gql<{ kvOperationsAdaptiveGroups: Array<{ sum: { requests: number }; dimensions: { actionType: string } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { kvOperationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { actionType } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { kvOperationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { actionType } } } } }`, fetcher),
     gql<{ kvStorageAdaptiveGroups: Array<{ max: { byteCount: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { kvStorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10) { max { byteCount } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { kvStorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10) { max { byteCount } } } } }`, fetcher),
   ]);
 
-  let reads = 0, writes = 0;
-  for (const r of ops?.kvOperationsAdaptiveGroups ?? []) {
-    if (r.dimensions.actionType === "read") reads += r.sum.requests;
-    else writes += r.sum.requests;
+  let reads = 0;
+  let writes = 0;
+  let deletes = 0;
+  let lists = 0;
+  let unclassified = 0;
+  for (const row of ops?.kvOperationsAdaptiveGroups ?? []) {
+    const count = requireUsage(row.sum?.requests, "kv.requests");
+    switch ((row.dimensions?.actionType ?? "").trim().toLowerCase()) {
+      case "read":
+        reads += count;
+        break;
+      case "write":
+        writes += count;
+        break;
+      case "delete":
+        deletes += count;
+        break;
+      case "list":
+        lists += count;
+        break;
+      default:
+        unclassified += count;
+        break;
+    }
   }
-  const storageGB = Math.max(...(store?.kvStorageAdaptiveGroups?.map(r => r.max.byteCount) ?? [0]), 0) / (1024 ** 3);
+  const storageGB = peakUsage(
+    (store?.kvStorageAdaptiveGroups ?? []).map((row) => row.max?.byteCount),
+    "kv.byteCount",
+  ) / (1024 ** 3);
 
   return {
-    usage: { reads, writes, storage_gb: +storageGB.toFixed(4) },
-    included: { reads: INCLUDED.kv.read, writes: INCLUDED.kv.write, storage_gb: INCLUDED.kv.storage_gb },
+    usage: {
+      reads,
+      writes,
+      deletes,
+      lists,
+      ...(unclassified > 0 ? { unclassified } : {}),
+      storage_gb: +storageGB.toFixed(4),
+    },
+    included: {
+      reads: INCLUDED.kv.read,
+      writes: INCLUDED.kv.write,
+      deletes: INCLUDED.kv.delete,
+      lists: INCLUDED.kv.list,
+      storage_gb: INCLUDED.kv.storage_gb,
+    },
     cost:
       overageCostPerM(reads, INCLUDED.kv.read, pricing.kv.read) +
       overageCostPerM(writes, INCLUDED.kv.write, pricing.kv.write) +
+      overageCostPerM(deletes, INCLUDED.kv.delete, pricing.kv.delete) +
+      overageCostPerM(lists, INCLUDED.kv.list, pricing.kv.list) +
       Math.max(0, storageGB - INCLUDED.kv.storage_gb) * pricing.kv.storage_gb,
+    ...(unclassified > 0 ? { warnings: ["analytics_metric_unmetered:kv.unclassified"] } : {}),
   };
+}
+
+const R2_CLASS_A = new Set([
+  "listbuckets",
+  "putbucket",
+  "listobjects",
+  "listobjectsv1",
+  "listobjectsv2",
+  "putobject",
+  "copyobject",
+  "completemultipartupload",
+  "createmultipartupload",
+  "lifecyclestoragetiertransition",
+  "listmultipartuploads",
+  "uploadpart",
+  "uploadpartcopy",
+  "listparts",
+  "putbucketencryption",
+  "putbucketcors",
+  "putbucketlifecycleconfiguration",
+  "putbucketstorageclass",
+]);
+
+const R2_CLASS_B = new Set([
+  "headbucket",
+  "headobject",
+  "getobject",
+  "usagesummary",
+  "getbucketencryption",
+  "getbucketlocation",
+  "getbucketcors",
+  "getbucketlifecycleconfiguration",
+]);
+
+const R2_FREE = new Set([
+  "deleteobject",
+  "deleteobjects",
+  "deletebucket",
+  "abortmultipartupload",
+]);
+
+function classifyR2Action(action: string): "class_a" | "class_b" | "free" | "unknown" {
+  const name = action.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (R2_CLASS_A.has(name)) return "class_a";
+  if (R2_CLASS_B.has(name)) return "class_b";
+  if (R2_FREE.has(name)) return "free";
+  if (name.startsWith("abort") || name.startsWith("delete")) return "free";
+  if (name.startsWith("head") || name.startsWith("get")) return "class_b";
+  if (
+    name.startsWith("list")
+    || name.startsWith("put")
+    || name.startsWith("copy")
+    || name.startsWith("post")
+    || name.startsWith("create")
+    || name.startsWith("complete")
+    || name.startsWith("upload")
+    || name.includes("lifecycle")
+  ) {
+    return "class_a";
+  }
+  return "unknown";
 }
 
 async function queryR2(acct: string, token: string, period: CostPeriod, pricing: CfPricing, fetcher: typeof fetch): Promise<ServiceCost> {
   const { start, end } = period;
   const [ops, store] = await Promise.all([
     gql<{ r2OperationsAdaptiveGroups: Array<{ sum: { requests: number }; dimensions: { actionType: string; bucketName: string } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { r2OperationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { actionType bucketName } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { r2OperationsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests } dimensions { actionType bucketName } } } } }`, fetcher),
     gql<{ r2StorageAdaptiveGroups: Array<{ max: { payloadSize: number; objectCount: number }; dimensions: { bucketName: string } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { r2StorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:100) { max { payloadSize objectCount } dimensions { bucketName } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { r2StorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:100) { max { payloadSize objectCount } dimensions { bucketName } } } } }`, fetcher),
   ]);
 
-  let classA = 0, classB = 0;
+  let classA = 0;
+  let classB = 0;
+  let freeOps = 0;
+  let unclassified = 0;
   const bucketOps = new Map<string, number>();
-  for (const r of ops?.r2OperationsAdaptiveGroups ?? []) {
-    const a = r.dimensions.actionType.toLowerCase();
-    if (/put|post|copy|create|complete|abort/i.test(a)) classA += r.sum.requests;
-    else classB += r.sum.requests;
-    bucketOps.set(r.dimensions.bucketName, (bucketOps.get(r.dimensions.bucketName) ?? 0) + r.sum.requests);
+  for (const row of ops?.r2OperationsAdaptiveGroups ?? []) {
+    const count = requireUsage(row.sum?.requests, "r2.requests");
+    const bucket = row.dimensions?.bucketName ?? "";
+    const kind = classifyR2Action(row.dimensions?.actionType ?? "");
+    if (kind === "class_a") classA += count;
+    else if (kind === "class_b") classB += count;
+    else if (kind === "free") freeOps += count;
+    else unclassified += count;
+    bucketOps.set(bucket, (bucketOps.get(bucket) ?? 0) + count);
   }
-  const storageGB = (store?.r2StorageAdaptiveGroups ?? []).reduce((s, r) => s + r.max.payloadSize, 0) / (1024 ** 3);
+  const bucketBytes = new Map<string, number>();
+  for (const row of store?.r2StorageAdaptiveGroups ?? []) {
+    const bytes = requireUsage(row.max?.payloadSize, "r2.payloadSize");
+    const bucket = row.dimensions?.bucketName ?? "";
+    bucketBytes.set(bucket, Math.max(bucketBytes.get(bucket) ?? 0, bytes));
+  }
+  const storageGB = [...bucketBytes.values()].reduce((sum, bytes) => sum + bytes, 0) / (1024 ** 3);
 
   return {
-    usage: { class_a_ops: classA, class_b_ops: classB, storage_gb: +storageGB.toFixed(4) },
+    usage: {
+      class_a_ops: classA,
+      class_b_ops: classB,
+      free_ops: freeOps,
+      ...(unclassified > 0 ? { unclassified_ops: unclassified } : {}),
+      storage_gb: +storageGB.toFixed(4),
+    },
     included: { class_a_ops: INCLUDED.r2.class_a, class_b_ops: INCLUDED.r2.class_b, storage_gb: INCLUDED.r2.storage_gb },
     cost:
       overageCostPerM(classA, INCLUDED.r2.class_a, pricing.r2.class_a) +
       overageCostPerM(classB, INCLUDED.r2.class_b, pricing.r2.class_b) +
       Math.max(0, storageGB - INCLUDED.r2.storage_gb) * pricing.r2.storage_gb,
+    ...(unclassified > 0 ? { warnings: ["analytics_metric_unmetered:r2.unclassified"] } : {}),
     breakdown: [...bucketOps.entries()].sort((a, b) => b[1] - a[1]).map(([bucket, total]) => ({ bucket, total_ops: total })),
   };
 }
@@ -273,14 +488,23 @@ async function queryD1(acct: string, token: string, period: CostPeriod, pricing:
   const { start, end } = period;
   const [analytics, store] = await Promise.all([
     gql<{ d1AnalyticsAdaptiveGroups: Array<{ sum: { rowsRead: number; rowsWritten: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { d1AnalyticsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { rowsRead rowsWritten } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { d1AnalyticsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { rowsRead rowsWritten } } } } }`, fetcher),
     gql<{ d1StorageAdaptiveGroups: Array<{ max: { databaseSizeBytes: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { d1StorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:100) { max { databaseSizeBytes } } } } }`, fetcher),
+      acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { d1StorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:100) { max { databaseSizeBytes } } } } }`, fetcher),
   ]);
 
-  const rowsRead = analytics?.d1AnalyticsAdaptiveGroups?.reduce((s, r) => s + r.sum.rowsRead, 0) ?? 0;
-  const rowsWritten = analytics?.d1AnalyticsAdaptiveGroups?.reduce((s, r) => s + r.sum.rowsWritten, 0) ?? 0;
-  const storageGB = Math.max(...(store?.d1StorageAdaptiveGroups?.map(r => r.max.databaseSizeBytes) ?? [0]), 0) / (1024 ** 3);
+  const rowsRead = (analytics?.d1AnalyticsAdaptiveGroups ?? []).reduce(
+    (sum, row) => sum + requireUsage(row.sum?.rowsRead, "d1.rowsRead"),
+    0,
+  );
+  const rowsWritten = (analytics?.d1AnalyticsAdaptiveGroups ?? []).reduce(
+    (sum, row) => sum + requireUsage(row.sum?.rowsWritten, "d1.rowsWritten"),
+    0,
+  );
+  const storageGB = peakUsage(
+    (store?.d1StorageAdaptiveGroups ?? []).map((row) => row.max?.databaseSizeBytes),
+    "d1.databaseSizeBytes",
+  ) / (1024 ** 3);
 
   return {
     usage: { rows_read: rowsRead, rows_written: rowsWritten, storage_gb: +storageGB.toFixed(4) },
@@ -296,13 +520,17 @@ async function queryAI(acct: string, token: string, period: CostPeriod, pricing:
   const { start, end } = period;
   const data = await gql<{
     aiInferenceAdaptiveGroups: Array<{ sum: { neurons: number }; dimensions: { modelName: string } }>;
-  }>(acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { aiInferenceAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { neurons } dimensions { modelName } } } } }`, fetcher);
+  }>(acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { aiInferenceAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { neurons } dimensions { modelName } } } } }`, fetcher);
 
   const rows = data?.aiInferenceAdaptiveGroups ?? [];
-  const neurons = rows.reduce((s, r) => s + r.sum.neurons, 0);
-
+  let neurons = 0;
   const byModel = new Map<string, number>();
-  for (const r of rows) byModel.set(r.dimensions.modelName, (byModel.get(r.dimensions.modelName) ?? 0) + r.sum.neurons);
+  for (const row of rows) {
+    const count = requireUsage(row.sum?.neurons, "workers_ai.neurons");
+    neurons += count;
+    const model = row.dimensions?.modelName ?? "";
+    byModel.set(model, (byModel.get(model) ?? 0) + count);
+  }
 
   return {
     usage: { neurons },
@@ -316,11 +544,16 @@ async function queryBrowserRendering(acct: string, token: string, period: CostPe
   const { start, end } = period;
   const data = await gql<{
     browserRenderingApiAdaptiveGroups: Array<{ sum: { requests: number; durationMs: number } }>;
-  }>(acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { browserRenderingApiAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests durationMs } } } } }`, fetcher);
+  }>(acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { browserRenderingApiAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { requests durationMs } } } } }`, fetcher);
 
   const rows = data?.browserRenderingApiAdaptiveGroups ?? [];
-  const requests = rows.reduce((s, r) => s + r.sum.requests, 0);
-  const hours = rows.reduce((s, r) => s + r.sum.durationMs, 0) / 3_600_000;
+  let requests = 0;
+  let durationMs = 0;
+  for (const row of rows) {
+    requests += requireUsage(row.sum?.requests, "browser_rendering.requests");
+    durationMs += requireUsage(row.sum?.durationMs, "browser_rendering.durationMs");
+  }
+  const hours = durationMs / 3_600_000;
 
   return {
     usage: { requests, hours: +hours.toFixed(2) },
@@ -333,11 +566,19 @@ async function queryContainers(acct: string, token: string, period: CostPeriod, 
   const { start, end } = period;
   const data = await gql<{
     containersMetricsAdaptiveGroups: Array<{ sum: { cpuTimeUs: number; memoryGiBSeconds: number; diskGBSeconds: number } }>;
-  }>(acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { containersMetricsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { cpuTimeUs memoryGiBSeconds diskGBSeconds } } } } }`, fetcher);
+  }>(acct, token, `{ viewer { accounts(filter:{accountTag:${graphqlQuoted(acct)}}) { containersMetricsAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { cpuTimeUs memoryGiBSeconds diskGBSeconds } } } } }`, fetcher);
 
   const rows = data?.containersMetricsAdaptiveGroups ?? [];
-  const cpuS = rows.reduce((s, r) => s + r.sum.cpuTimeUs, 0) / 1_000_000;
-  const memGiBs = rows.reduce((s, r) => s + r.sum.memoryGiBSeconds, 0);
+  let cpuUs = 0;
+  let memGiBs = 0;
+  for (const row of rows) {
+    cpuUs += requireUsage(row.sum?.cpuTimeUs, "containers.cpuTimeUs");
+    memGiBs += requireUsage(row.sum?.memoryGiBSeconds, "containers.memoryGiBSeconds");
+    if (row.sum && "diskGBSeconds" in row.sum && row.sum.diskGBSeconds != null) {
+      requireUsage(row.sum.diskGBSeconds, "containers.diskGBSeconds");
+    }
+  }
+  const cpuS = cpuUs / 1_000_000;
 
   const inclCpuS = INCLUDED.containers.cpu_vcpu_min * 60;
   const inclMemS = INCLUDED.containers.mem_gib_h * 3600;
@@ -448,7 +689,9 @@ async function estimateCloudflareServices(
 
   await Promise.all(queries.map(async ([name, query]) => {
     try {
-      services[name] = { ...(await query()), status: "available" };
+      const result = await query();
+      services[name] = { ...result, status: "available" };
+      if (result.warnings?.length) warnings.push(...result.warnings);
     } catch (cause) {
       if (signal?.aborted) throw costAttributionProviderError("cloudflare", cause);
       services[name] = { usage: {}, included: {}, cost: null, status: "unavailable" };
@@ -456,14 +699,15 @@ async function estimateCloudflareServices(
     }
   }));
 
-  const unavailable = warnings.length;
+  const unavailable = Object.values(services).filter((service) => service.status === "unavailable").length;
+  const metricGap = warnings.some((warning) => warning.startsWith("analytics_metric_unmetered:"));
   return {
     services,
-    completeness: unavailable === 0
-      ? "complete"
-      : unavailable === queries.length
-        ? "unavailable"
-        : "partial",
+    completeness: unavailable === queries.length
+      ? "unavailable"
+      : unavailable > 0 || metricGap
+        ? "partial"
+        : "complete",
     warnings,
   };
 }
@@ -475,6 +719,8 @@ async function generateCloudflareCostReport(
   pricing: CfPricing,
   options: CloudflareCostAttributionOptions,
 ): Promise<CostReport> {
+  validateCostPeriod(period, "cloudflare");
+  throwIfAborted(options.signal);
   const baseFetch = options.fetch ?? fetch;
   const fetcher: typeof fetch = options.signal
     ? ((input, init) => baseFetch(input, { ...init, signal: options.signal })) as typeof fetch
@@ -491,6 +737,8 @@ async function generateCloudflareCostReport(
     if (options.signal?.aborted) throw costAttributionProviderError("cloudflare", cause);
     providerBillingAvailable = false;
   }
+
+  throwIfAborted(options.signal);
 
   if (providerUsage?.source === "provider_billed" && providerUsage.total_billed_cost !== null) {
     const totalCost = providerUsage.total_billed_cost;
@@ -529,6 +777,7 @@ async function generateCloudflareCostReport(
     (sum, service) => sum + (service.cost ?? 0),
     0,
   );
+  throwIfAborted(options.signal);
   const warnings = [
     ...(providerUsage?.warnings ?? (providerBillingAvailable ? [] : ["provider_billing_unavailable"])),
     ...estimate.warnings,

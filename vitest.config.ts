@@ -443,6 +443,7 @@ export default defineConfig({
       "packages/auth/**",
       "packages/acp-runtime/**",
       "packages/cli/**",
+      "packages/cf-billing/test/**",
       "packages/cap/test/**",
       "packages/integrations-adapters-node/**",
       "packages/integrations-adapters-cf/test/**",
