@@ -6,6 +6,10 @@ import { Hono } from "hono";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "@open-managed-agents/shared";
 import {
+  bindAccessLossHooks,
+  mcpRequestBodyText,
+} from "@open-managed-agents/mcp-access-loss";
+import {
   buildCfTenantDbProvider,
   servicesMiddleware,
   tenantDbMiddleware,
@@ -184,6 +188,7 @@ import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
 import statsRoutes from "./routes/stats";
 import inferenceProxyRoutes from "./routes/inference-proxy";
+import { createCloudflareAccessLossRuntime } from "./lib/mcp-access-loss";
 import mcpProxyRoutes, {
   createManagedMcpProxyCredentialSource,
   resolveProxyTargetByTenant,
@@ -1887,6 +1892,16 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       };
     }
     const inboundHeaders = new Headers(opts.headers);
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const accessLossHooks = await bindAccessLossHooks(
+      createCloudflareAccessLossRuntime(this.env, tenantDb),
+      {
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+        serverName: opts.serverName,
+        requestBody: opts.body,
+      },
+    );
     const res = await forwardWithRefresh(
       services,
       opts.tenantId,
@@ -1895,6 +1910,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       inboundHeaders,
       opts.body,
       { sessionId: opts.sessionId, serverName: opts.serverName, callerKind: "rpc-mcp" },
+      accessLossHooks,
     );
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
@@ -1981,6 +1997,16 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     const body = ["GET", "HEAD"].includes(request.method)
       ? null
       : await request.arrayBuffer();
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(tenantId);
+    const accessLossHooks = await bindAccessLossHooks(
+      createCloudflareAccessLossRuntime(this.env, tenantDb),
+      {
+        workspaceId: tenantId,
+        sessionId,
+        serverName,
+        requestBody: mcpRequestBodyText(body),
+      },
+    );
     return forwardWithRefresh(
       services,
       tenantId,
@@ -1989,6 +2015,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       inboundHeaders,
       body,
       { sessionId, serverName, callerKind: "rpc-mcp" },
+      accessLossHooks,
     );
   }
 

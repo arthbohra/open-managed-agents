@@ -62,6 +62,7 @@ import { buildNodeSkillsRoutes } from "../lib/node-skills-routes.js";
 
 import { buildNodeHttpInferenceProxyRoutes } from "../lib/http-inference-proxy.js";
 import { buildNodeHttpMcpProxyRoutes } from "../lib/http-mcp-proxy.js";
+import { createNodeAccessLossRuntime } from "../lib/mcp-access-loss.js";
 
 import { Disposables } from "../lifecycle.js";
 
@@ -395,6 +396,7 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
   }));
   v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
     resolveTarget: resolveNodeMcpProxyTarget,
+    accessLoss: await createNodeAccessLossRuntime(sql),
   }));
   v1.route("/oma/inference-proxy", buildNodeHttpInferenceProxyRoutes({
     resolveUpstream: resolveNodeInferenceUpstream,
