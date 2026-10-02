@@ -376,6 +376,38 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       });
     }
 
+    // The 101 client socket is an I/O object owned by the DO that created it.
+    // Reading response.webSocket after runInDurableObject returns throws
+    // "Cannot perform I/O on behalf of a different Durable Object", so
+    // accept/close has to happen inside that callback. The wait runs in a
+    // later callback, after the test's getWebSockets stub is gone.
+    function closeOwnedSocket(response) {
+      const socket = response?.webSocket;
+      if (!socket) throw new Error("attach did not return a websocket");
+      try {
+        socket.accept();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/already accepted/i.test(message)) throw error;
+      }
+      if (socket.readyState !== WebSocket.CLOSED) socket.close(1000, "test finished");
+    }
+
+    async function waitUntilNoDaemonSockets(stub) {
+      // webSocketClose runs on client close (it logs daemon_close and calls
+      // markOffline) while getWebSockets() can still list the hibernated
+      // socket. Wait until none of those sockets are still open.
+      await vi.waitFor(async () => {
+        let open = -1;
+        await runInDurableObject(stub, async (instance) => {
+          open = instance.ctx.getWebSockets("daemon").filter((socket) =>
+            socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN,
+          ).length;
+        });
+        expect(open).toBe(0);
+      });
+    }
+
     it("persists ordered runner output before acknowledging and deduplicates reconnect replay", async () => {
       const { stub } = await freshRoom(["tn_delivery", "tn_other"]);
       await runInDurableObject(stub, async (room, state) => {
@@ -484,8 +516,10 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
         );
 
         expect(response.status).toBe(101);
+        closeOwnedSocket(response);
       });
       expect(staleSocketClosed).toBe(true);
+      await waitUntilNoDaemonSockets(stub);
     });
 
     it("keeps the current daemon while its server-observed lease is fresh", async () => {
@@ -556,8 +590,10 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
         );
 
         expect(response.status).toBe(101);
+        closeOwnedSocket(response);
       });
       expect(offlineSocketClosed).toBe(true);
+      await waitUntilNoDaemonSockets(stub);
     });
 
     it("does not let an evicted daemon close mark its replacement offline", async () => {
@@ -599,13 +635,17 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
         expect(response.status).toBe(101);
 
         await room.webSocketClose(staleSocket, 1012, "lease expired");
+        const row = await env.AUTH_DB
+          .prepare(`SELECT status FROM "runtimes" WHERE id = ?`)
+          .bind(runtimeId)
+          .first();
+        expect(row?.status).toBe("online");
+        // Closing the replacement runs markOffline. That has to happen after
+        // the assertion, and it has to happen here: the client socket cannot
+        // leave this Durable Object.
+        closeOwnedSocket(response);
       });
-
-      const row = await env.AUTH_DB
-        .prepare(`SELECT status FROM "runtimes" WHERE id = ?`)
-        .bind(runtimeId)
-        .first<{ status: string }>();
-      expect(row?.status).toBe("online");
+      await waitUntilNoDaemonSockets(stub);
     });
 
     it("drops messages from a daemon that no longer owns the room", async () => {
