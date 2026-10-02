@@ -6,6 +6,7 @@
 // stores therefore stay behind their existing Ports and never branch on a
 // concrete database.
 
+import { retryTransientDb } from "../db-errors";
 import type {
   SqlClient,
   SqlRunResult,
@@ -573,7 +574,10 @@ class Mysql2SqlStatement implements SqlStatement {
         success: true,
       };
     }
-    return this.executeRunIn<T>(this.executor);
+    return retryTransientDb(
+      () => this.executeRunIn<T>(this.executor),
+      { sql: this.statement.text },
+    );
   }
 
   async first<T = unknown>(): Promise<T | null> {
@@ -581,12 +585,14 @@ class Mysql2SqlStatement implements SqlStatement {
       const result = await this.executeReturning<T>();
       return result.rows[0] ?? null;
     }
-    const [result] = await this.executor.execute(
-      this.statement.text,
-      this.executionParams(),
-    );
-    if (!Array.isArray(result)) return null;
-    return (result[0] ?? null) as T | null;
+    return retryTransientDb(async () => {
+      const [result] = await this.executor.execute(
+        this.statement.text,
+        this.executionParams(),
+      );
+      if (!Array.isArray(result)) return null;
+      return (result[0] ?? null) as T | null;
+    }, { sql: this.statement.text });
   }
 
   async all<T = unknown>(): Promise<SqlSelectResult<T>> {
@@ -594,21 +600,27 @@ class Mysql2SqlStatement implements SqlStatement {
       const result = await this.executeReturning<T>();
       return { results: result.rows, meta: { changes: result.changes } };
     }
-    const [result] = await this.executor.execute(
-      this.statement.text,
-      this.executionParams(),
-    );
-    if (!Array.isArray(result)) {
-      return {
-        results: [],
-        meta: { changes: result.affectedRows ?? 0 },
-      };
-    }
-    return { results: result as T[], meta: { changes: 0 } };
+    return retryTransientDb(async () => {
+      const [result] = await this.executor.execute(
+        this.statement.text,
+        this.executionParams(),
+      );
+      if (!Array.isArray(result)) {
+        return {
+          results: [],
+          meta: { changes: result.affectedRows ?? 0 },
+        };
+      }
+      return { results: result as T[], meta: { changes: 0 } };
+    }, { sql: this.statement.text });
   }
 
   belongsTo(owner: MysqlStatementOwner): boolean {
     return this.owner === owner;
+  }
+
+  statementText(): string {
+    return this.statement.text;
   }
 
   async executeRunIn<T>(executor: MysqlExecutor): Promise<SqlRunResult<T>> {
@@ -635,7 +647,14 @@ class Mysql2SqlStatement implements SqlStatement {
       : this.statement.parameterOrder.map((index) => this.params[index]);
   }
 
-  private async executeReturning<T>(): Promise<{ rows: T[]; changes: number }> {
+  private executeReturning<T>(): Promise<{ rows: T[]; changes: number }> {
+    return retryTransientDb(
+      () => this.executeReturningOnce<T>(),
+      { sql: this.statement.text },
+    );
+  }
+
+  private async executeReturningOnce<T>(): Promise<{ rows: T[]; changes: number }> {
     const connection = await this.owner.pool.getConnection();
     try {
       await connection.beginTransaction();
@@ -650,7 +669,7 @@ class Mysql2SqlStatement implements SqlStatement {
       await connection.commit();
       return result;
     } catch (error) {
-      await connection.rollback();
+      await connection.rollback().catch(() => undefined);
       throw error;
     } finally {
       connection.release();
@@ -755,7 +774,19 @@ export class Mysql2SqlClient implements SqlClient {
     );
   }
 
-  async batch<T = unknown>(
+  batch<T = unknown>(
+    statements: SqlStatement[],
+  ): Promise<Array<SqlRunResult<T>>> {
+    const sql = statements
+      .map((statement) =>
+        statement instanceof Mysql2SqlStatement ? statement.statementText() : "",
+      )
+      .filter((text) => text.length > 0)
+      .join(";\n");
+    return retryTransientDb(() => this.batchOnce<T>(statements), { sql });
+  }
+
+  private async batchOnce<T = unknown>(
     statements: SqlStatement[],
   ): Promise<Array<SqlRunResult<T>>> {
     const connection = await this.pool.getConnection();
@@ -776,7 +807,7 @@ export class Mysql2SqlClient implements SqlClient {
       await connection.commit();
       return results;
     } catch (error) {
-      await connection.rollback();
+      await connection.rollback().catch(() => undefined);
       throw error;
     } finally {
       connection.release();

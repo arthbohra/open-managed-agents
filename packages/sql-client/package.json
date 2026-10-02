@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./db-errors": "./src/db-errors.ts",
     "./adapters/cf-do": "./src/adapters/cf-do.ts",
     "./adapters/cf-d1": "./src/adapters/cf-d1.ts",
     "./adapters/better-sqlite3": "./src/adapters/better-sqlite3.ts",
@@ -16,7 +17,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@open-managed-agents/shared": "workspace:*"
+    "@open-managed-agents/shared": "workspace:*",
+    "effect": "3.22.1"
   },
   "peerDependencies": {
     "better-sqlite3": "^13.0.3",

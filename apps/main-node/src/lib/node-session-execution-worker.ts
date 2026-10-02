@@ -15,6 +15,10 @@ import type {
   SessionExecutionContext,
   SessionExecutionContextSourcePort,
 } from "@open-managed-agents/session-runtime-contract/context";
+import {
+  emitDbBoundaryLog,
+  withDbBoundary,
+} from "@open-managed-agents/sql-client";
 
 export interface RunNodeSessionExecution extends AcceptedSessionEvents {
   executionId: string;
@@ -59,26 +63,6 @@ interface ActiveExecution {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-async function withHeartbeatDeadline<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`Session execution renewal timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
 }
 
 /**
@@ -243,7 +227,7 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
       active.promise = this.#run(active).finally(() => {
         if (this.#active.get(key) === active) this.#active.delete(key);
         this.#pollInBackground();
-      });
+      }).catch((error) => this.#reportError(error));
     }
   }
 
@@ -284,30 +268,49 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
       await heartbeatChain;
     }
     if (active.leaseLost) return;
-    const settled = await this.dependencies.coordinator.settle({
-      fence: active.fence,
-      settledAt: this.dependencies.clock.now().toISOString(),
-      outcome,
-      ...(failure !== undefined && { failure }),
-    });
-    if (settled.type === "lost") {
-      active.leaseLost = true;
-      await this.#cancel(active, "lease_lost");
+    try {
+      const settled = await this.dependencies.coordinator.settle({
+        fence: active.fence,
+        settledAt: this.dependencies.clock.now().toISOString(),
+        outcome,
+        ...(failure !== undefined && { failure }),
+      });
+      if (settled.type === "lost") {
+        active.leaseLost = true;
+        this.#logLeaseLost(active);
+        await this.#cancel(active, "lease_lost");
+      }
+    } catch (error) {
+      // The settle transaction rolled back. Leave the row running so the
+      // lease can expire and another replica can recover it. Do not crash.
+      this.#reportError(error);
     }
   }
 
   async #heartbeat(active: ActiveExecution): Promise<void> {
     if (active.leaseLost) return;
-    const renewed = await withHeartbeatDeadline(
-      this.dependencies.coordinator.renew({
+    let renewed: Awaited<ReturnType<NodeSessionExecutionWorkerDependencies["coordinator"]["renew"]>>;
+    try {
+      renewed = await withDbBoundary({
+        op: "session_execution.heartbeat",
+        sessionId: active.execution.sessionId,
+        timeoutMs: this.#heartbeatIntervalMs,
+      }, () => this.dependencies.coordinator.renew({
         fence: active.fence,
         renewedAt: this.dependencies.clock.now().toISOString(),
         leaseTtlMs: this.#leaseTtlMs,
-      }),
-      this.#heartbeatIntervalMs,
-    );
+      }));
+    } catch (error) {
+      if (this.#leaseDeadlinePassed(active)) {
+        await this.#loseLease(active, error);
+      } else {
+        this.#reportError(error);
+      }
+      return;
+    }
     if (renewed.type === "lost") {
       active.leaseLost = true;
+      this.#logLeaseLost(active);
       await this.#cancel(active, "lease_lost");
       return;
     }
@@ -320,8 +323,26 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
     }
   }
 
+  #leaseDeadlinePassed(active: ActiveExecution): boolean {
+    return Date.parse(active.fence.expiresAt) <= this.dependencies.clock.now().getTime();
+  }
+
+  #logLeaseLost(active: ActiveExecution): void {
+    emitDbBoundaryLog({
+      op: "session_execution.lease",
+      sessionId: active.execution.sessionId,
+      durationMs: 0,
+      retryCount: 0,
+      outcome: "error",
+      errorTag: "LeaseLost",
+    });
+  }
+
   async #loseLease(active: ActiveExecution, error: unknown): Promise<void> {
     this.#reportError(error);
+    // A thrown renew/heartbeat error is not a confirmed CAS miss. Keep the
+    // turn until the lease deadline actually passes.
+    if (!this.#leaseDeadlinePassed(active)) return;
     active.leaseLost = true;
     try {
       await this.#cancel(active, "lease_lost");

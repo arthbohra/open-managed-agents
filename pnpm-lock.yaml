@@ -3913,6 +3913,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
     devDependencies:
       '@testcontainers/mysql':
         specifier: ^12.1.0
