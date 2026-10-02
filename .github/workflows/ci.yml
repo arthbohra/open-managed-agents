@@ -57,10 +57,29 @@ jobs:
       # Litebox aborts its host process when /dev/kvm is not accessible.
       - name: Enable KVM for Litebox
         run: |
+          echo "=== Initial KVM state ==="
+          ls -la /dev/kvm 2>&1 || echo "/dev/kvm does not exist yet"
+          groups
+          echo ""
+          echo "=== Setting up udev rule ==="
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          test -r /dev/kvm && test -w /dev/kvm
+          echo "Waiting for udev to settle..."
+          sudo udevadm settle --timeout=10
+          echo ""
+          echo "=== Final KVM state ==="
+          ls -la /dev/kvm 2>&1 || { echo "ERROR: /dev/kvm does not exist - KVM is not available on this runner"; exit 1; }
+          echo ""
+          echo "=== Verifying KVM access ==="
+          if test -r /dev/kvm && test -w /dev/kvm; then
+            echo "SUCCESS: /dev/kvm is readable and writable"
+          else
+            echo "ERROR: /dev/kvm exists but is not accessible"
+            ls -la /dev/kvm
+            groups
+            exit 1
+          fi
 
       - name: MySQL integration tests
         run: pnpm test:integration:mysql
