@@ -80,6 +80,11 @@ jobs:
       - name: Storage integration tests
         run: pnpm test:integration:storage
 
+      # Same Litebox setup as CI. The two-owner MySQL test aborts the host
+      # process on Linux when /dev/kvm is not readable and writable.
+      - name: Enable KVM for Litebox
+        uses: ./.github/actions/enable-kvm
+
       - name: MySQL integration tests
         run: pnpm test:integration:mysql
 
