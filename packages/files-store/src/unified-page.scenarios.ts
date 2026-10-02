@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import { encodeOutputId } from "./output-id";
 import type { UnifiedPageHarness } from "./unified-page.harness";
+import type { UnifiedPageResult } from "./unified-page";
+
 
 export interface UnifiedPageScenarioOptions {
   /** When > 0, also walk a filename run long enough to cross a 1000-key list cap. */
@@ -258,7 +260,7 @@ export function registerUnifiedFilePageScenarios(
   }
 }
 
-function ok<T extends { ok: true }>(result: T | { ok: false; error: string }): T {
+function ok(result: UnifiedPageResult): Extract<UnifiedPageResult, { ok: true }> {
   if (!result.ok) throw new Error(result.error);
   return result;
 }
