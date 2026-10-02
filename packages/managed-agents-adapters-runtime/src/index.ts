@@ -26,7 +26,11 @@ export type {
   ModelCardCatalogRecord,
 } from "./model-card-catalog";
 export { configuredModelsModule } from "./configured-model-module";
-export { IndeterminateCredentialValidationProbe } from "./credential-validation-probe";
+export {
+  IndeterminateCredentialValidationProbe,
+  McpOAuthCredentialValidationProbe,
+} from "./credential-validation-probe";
+export type { McpOAuthCredentialValidationProbeOptions } from "./credential-validation-probe";
 export { CronDeploymentSchedulePlanner } from "./deployment-schedule-planner";
 export { DeduplicatingDreamCurator } from "./deduplicating-dream-curator";
 export { TimerEnvironmentWorkAvailabilityWaiter } from "./environment-work-availability-waiter";
