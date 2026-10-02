@@ -87,7 +87,15 @@ interface DriverConstructor {
 }
 
 describe("DefaultNodeManagedSessionRuntimeDriver", () => {
-  function startFailureDriver(start: () => Promise<void>, accepted: string[] = []) {
+  function startFailureDriver(
+    start: (input: runtimeModule.StartNodeManagedSessionRuntime) => Promise<void>,
+    accepted: string[] = [],
+    options: {
+      delayMs?: (attempt: number) => number;
+      nextEventId?: () => string;
+      onProjected?: (command: RecordSessionRuntimeEventsCommand) => void;
+    } = {},
+  ) {
     const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
     let id = 0;
     const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
@@ -101,12 +109,13 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
       projectionFor: () => ({
         recordSessionRuntimeEvents: async (command) => {
           projectionCalls.push(structuredClone(command));
+          options.onProjected?.(command);
           return { type: "recorded", session };
         },
       }),
       clock: { now: () => new Date("2026-08-26T00:30:00.000Z") },
-      ids: { nextEventId: () => `event_start_failure_0${++id}` },
-      startRetry: { attempts: 3, delayMs: () => 0 },
+      ids: { nextEventId: options.nextEventId ?? (() => `event_start_failure_0${++id}`) },
+      startRetry: { attempts: 3, delayMs: options.delayMs ?? (() => 0) },
     });
     const accept = () => driver.accept({
       workspaceId: "workspace_01", sessionId: session.id, session, environment,
@@ -118,7 +127,7 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
       const { id: _id, processedAt: _at, ...rest } = event as { id: string; processedAt: string };
       return rest;
     }));
-    return { accept, events, projectionCalls };
+    return { accept, events, projectionCalls, driver };
   }
 
   it("retries sandbox startup like Claude Managed Agents, then reports exhausted retries and goes idle", async () => {
@@ -147,6 +156,152 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
     expect(accepted).toEqual([session.id]);
     expect(events()).toEqual([
       { type: "session.error", error: { type: "unknown_error", message: "[unauthenticated] invalid username: 'user'", retryStatus: "retrying" } },
+      { type: "session.status_rescheduled" },
+    ]);
+  });
+
+  it("stamps exhausted session.error before the idle that follows it when the clock does not advance", async () => {
+    const ids = [
+      "event_retry_1",
+      "event_retry_2",
+      "event_retry_3",
+      "event_retry_4",
+      "event_z_exhausted",
+      "event_a_idle",
+    ];
+    let cursor = 0;
+    const { accept, projectionCalls } = startFailureDriver(
+      async () => { throw new Error("sprite preparation failed"); },
+      [],
+      { nextEventId: () => ids[cursor++] ?? `event_extra_${cursor}` },
+    );
+    await expect(accept()).rejects.toThrow("sprite preparation failed");
+    const ordered = [...projectionCalls.flatMap((call) => call.events)].sort((left, right) => {
+      const byTime = left.processedAt.localeCompare(right.processedAt);
+      return byTime === 0 ? left.id.localeCompare(right.id) : byTime;
+    });
+    expect(ordered.map((event) => event.processedAt)).toEqual([
+      "2026-08-26T00:30:00.000Z",
+      "2026-08-26T00:30:00.001Z",
+      "2026-08-26T00:30:00.002Z",
+      "2026-08-26T00:30:00.003Z",
+      "2026-08-26T00:30:00.004Z",
+      "2026-08-26T00:30:00.005Z",
+    ]);
+    // event_a_idle sorts before event_z_exhausted. Equal timestamps would
+    // replay idle first; the stamp keeps the error ahead of idle.
+    expect(ordered.slice(-2).map((event) => [event.id, event.type])).toEqual([
+      ["event_z_exhausted", "session.error"],
+      ["event_a_idle", "session.status_idle"],
+    ]);
+    expect(ordered.at(-2)).toMatchObject({ error: { retryStatus: "exhausted" } });
+    expect(ordered.at(-1)).toMatchObject({ stopReason: { type: "retries_exhausted" } });
+  });
+
+  it("stops startup retries during backoff when the turn is interrupted", async () => {
+    let starts = 0;
+    let markBackoff: (() => void) | undefined;
+    const backoffStarted = new Promise<void>((resolve) => { markBackoff = resolve; });
+    const { accept, events, driver } = startFailureDriver(async () => {
+      starts += 1;
+      throw new Error("sprite preparation failed");
+    }, [], {
+      delayMs: (attempt) => {
+        if (attempt === 1) markBackoff?.();
+        return 10_000;
+      },
+    });
+    const pending = accept();
+    await backoffStarted;
+    const startedAt = Date.now();
+    driver.cancel({ workspaceId: "workspace_01", sessionId: session.id, reason: "interrupt_requested" });
+    await expect(pending).rejects.toThrow("interrupt_requested");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(starts).toBe(1);
+    expect(events()).toEqual([
+      { type: "session.error", error: { type: "unknown_error", message: "sprite preparation failed", retryStatus: "retrying" } },
+      { type: "session.status_rescheduled" },
+      { type: "session.status_idle", stopReason: { type: "end_turn" } },
+    ]);
+  });
+
+  it("stops an in-flight startup attempt without emitting retrying", async () => {
+    let starts = 0;
+    let markAttempt: (() => void) | undefined;
+    const attemptStarted = new Promise<void>((resolve) => { markAttempt = resolve; });
+    const { accept, events, driver } = startFailureDriver(async (input) => {
+      starts += 1;
+      markAttempt?.();
+      await new Promise<void>((_resolve, reject) => {
+        const fail = () => reject(Object.assign(new Error("interrupt_requested"), { name: "AbortError" }));
+        if (input.signal === undefined) {
+          reject(new Error("startup attempt has no abort signal"));
+          return;
+        }
+        if (input.signal.aborted) { fail(); return; }
+        input.signal.addEventListener("abort", fail, { once: true });
+      });
+    });
+    const pending = accept();
+    await attemptStarted;
+    const startedAt = Date.now();
+    driver.cancel({ workspaceId: "workspace_01", sessionId: session.id, reason: "interrupt_requested" });
+    await expect(pending).rejects.toThrow("interrupt_requested");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(starts).toBe(1);
+    expect(events()).toEqual([]);
+  });
+
+  it("does not emit idle when a startup retry is cancelled because the lease was lost", async () => {
+    let starts = 0;
+    let markBackoff: (() => void) | undefined;
+    const backoffStarted = new Promise<void>((resolve) => { markBackoff = resolve; });
+    const { accept, events, driver } = startFailureDriver(async () => {
+      starts += 1;
+      throw new Error("sprite preparation failed");
+    }, [], {
+      delayMs: () => {
+        markBackoff?.();
+        return 10_000;
+      },
+    });
+    const pending = accept();
+    await backoffStarted;
+    driver.cancel({ workspaceId: "workspace_01", sessionId: session.id, reason: "lease_lost" });
+    await expect(pending).rejects.toThrow("lease_lost");
+    expect(starts).toBe(1);
+    expect(events()).toEqual([
+      { type: "session.error", error: { type: "unknown_error", message: "sprite preparation failed", retryStatus: "retrying" } },
+      { type: "session.status_rescheduled" },
+    ]);
+  });
+
+  it("stops startup retries when the session is stopped during backoff", async () => {
+    let starts = 0;
+    let markBackoff: (() => void) | undefined;
+    const backoffStarted = new Promise<void>((resolve) => { markBackoff = resolve; });
+    const { accept, events, driver } = startFailureDriver(async () => {
+      starts += 1;
+      throw new Error("sprite preparation failed");
+    }, [], {
+      delayMs: () => {
+        markBackoff?.();
+        return 10_000;
+      },
+    });
+    const pending = accept();
+    await backoffStarted;
+    const stopping = driver.stop({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      reason: "deleted",
+    });
+    await expect(pending).rejects.toThrow("session_deleted");
+    await stopping;
+    expect(starts).toBe(1);
+    expect(events()).toEqual([
+      { type: "session.error", error: { type: "unknown_error", message: "sprite preparation failed", retryStatus: "retrying" } },
       { type: "session.status_rescheduled" },
     ]);
   });
@@ -725,6 +880,7 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
         session,
         environment,
         initialEvents: [],
+        signal: expect.any(AbortSignal),
       },
       {
         type: "accept",

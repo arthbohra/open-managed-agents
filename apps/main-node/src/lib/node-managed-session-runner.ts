@@ -15,12 +15,16 @@ import type {
   SpanModelUsageView,
   ToolResultContentBlock,
 } from "@open-managed-agents/managed-agents-application";
-import type {
-  NodeManagedSessionRunner,
-  NodeManagedSessionRunnerAcceptInput,
-  StartNodeManagedSessionRuntime,
-  StopNodeManagedSessionRuntime,
-  ArchiveNodeManagedSessionThread,
+import {
+  abortedError,
+  abortableDelay,
+  linkAbort,
+  untilAborted,
+  type NodeManagedSessionRunner,
+  type NodeManagedSessionRunnerAcceptInput,
+  type StartNodeManagedSessionRuntime,
+  type StopNodeManagedSessionRuntime,
+  type ArchiveNodeManagedSessionThread,
 } from "./node-managed-session-runtime.js";
 import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
 import { ManagedNodeHarnessRuntime } from "./node-managed-harness-runtime.js";
@@ -131,12 +135,13 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
   confirmedTools: ManagedNodeConfirmedToolExecutionPort;
   outcomes: ManagedNodeOutcomeEvaluationPort;
   sandboxMode?(input: ManagedRunnerContext): SessionSandboxMode | Promise<SessionSandboxMode>;
-  buildSandbox(input: ManagedRunnerContext): Promise<SandboxExecutor>;
+  buildSandbox(input: ManagedRunnerContext & { signal?: AbortSignal }): Promise<SandboxExecutor>;
   /** Optional checkpoint_restore workspace. Ordinary OSS mounts are a different strategy. */
   workspaceCheckpoints?: NodeManagedWorkspaceCheckpoints;
   prepareSandbox?(input: ManagedRunnerContext & {
     sandbox: SandboxExecutor;
     runtimeGeneration: string;
+    signal?: AbortSignal;
   }): Promise<void>;
   /** Fenced turn barrier for provider-neutral writable state reconciliation. */
   /** Extra runtime-state check before reusing a warm sandbox (for example
@@ -218,97 +223,122 @@ export class DefaultNodeManagedSessionRunner
   }
 
   async start(input: StartNodeManagedSessionRuntime): Promise<void> {
-    const fingerprint = JSON.stringify({
-      resources: input.session.resources,
-      skills: input.session.agent.skills,
-      environment: input.environment.config,
-    });
-    const existing = this.sandboxes.get(input);
-    if (this.dependencies.workspaceCheckpoints !== undefined && input.executionFence === undefined) {
-      throw new Error("Managed workspace checkpoint_restore requires a Session Execution fence");
-    }
-    if (
-      existing !== undefined &&
-      this.sandboxConfigurationFingerprints.get(input) === fingerprint &&
-      (this.dependencies.workspaceCheckpoints === undefined || this.workspaces.get(input)?.trusted === true) &&
-      (this.dependencies.isSandboxCurrent === undefined || await this.dependencies.isSandboxCurrent({
-        workspaceId: input.workspaceId, session: input.session, environment: input.environment,
-        runtimeGeneration: this.runtimeGenerations.get(input)!,
-      }))
-    ) return;
-    if (existing !== undefined) {
-      const previousWorkspace = this.workspaces.get(input);
-      this.workspaces.delete(input);
-      if (previousWorkspace !== undefined) {
-        await previousWorkspace.port.release({
-          scope: previousWorkspace.scope,
-          fence: this.dependencies.workspaceCheckpoints!.runtimeFence(previousWorkspace.fence, previousWorkspace.scope.environmentId),
-          binding: previousWorkspace.binding,
-        });
-      }
-      this.abortControllers.get(input)?.abort();
-      this.abortControllers.delete(input);
-      this.sandboxes.delete(input);
-      this.sandboxRuntimes.delete(input);
-      this.runtimeGenerations.delete(input);
-      this.sandboxConfigurationFingerprints.delete(input);
-      await existing.destroy?.();
-    }
-    const runtimeGeneration = this.dependencies.runtimeGenerations?.next()
-      ?? `runtime_${randomUUID()}`;
-    const context = { workspaceId: input.workspaceId, session: input.session, environment: input.environment };
-    const runtime = new SessionSandboxRuntime({
-      mode: () => this.dependencies.sandboxMode?.(context) ?? "sandbox",
-      create: () => this.dependencies.buildSandbox(context),
-      prepare: sandbox => this.dependencies.prepareSandbox?.({ ...context, sandbox, runtimeGeneration }) ?? Promise.resolve(),
-    });
-    const sandbox = await runtime.acquire();
-    let workspace: ManagedWorkspaceState | undefined;
+    const startup = new AbortController();
+    const unlinkParent = linkAbort(input.signal, startup);
+    const signal = startup.signal;
+    let registered = false;
     try {
-      const checkpoints = this.dependencies.workspaceCheckpoints;
-      if (checkpoints !== undefined) {
-        const fence = input.executionFence!;
-        const scope = {
-          workspaceId: input.workspaceId,
-          environmentId: input.environment.id,
-          sessionId: input.sessionId,
-          workId: fence.executionId,
-        };
-        const active = await checkpoints.active(scope);
-        const port = checkpoints.port(sandbox);
-        const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
-        const binding = await port.materialize({
-          scope, fence: runtimeFence, strategy: "checkpoint_restore",
-          activeCheckpoint: active?.candidate ?? null,
-          idempotencyKey: runtimeGeneration,
-          signal: new AbortController().signal,
-        });
-        workspace = { port, binding, scope, fence, activeId: active?.candidate.id ?? null, trusted: true };
-        // A missing/corrupt published archive is a hard failure. Session
-        // inputs and the harness must never observe an empty replacement.
-        await port.attach({
-          scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
-          sandbox: { provider: "node", runtimeId: runtimeGeneration },
-          signal: new AbortController().signal,
-        });
+      if (signal.aborted) throw abortedError(signal);
+      const fingerprint = JSON.stringify({
+        resources: input.session.resources,
+        skills: input.session.agent.skills,
+        environment: input.environment.config,
+      });
+      const existing = this.sandboxes.get(input);
+      if (this.dependencies.workspaceCheckpoints !== undefined && input.executionFence === undefined) {
+        throw new Error("Managed workspace checkpoint_restore requires a Session Execution fence");
       }
-      await runtime.prepare();
-    } catch (error) {
-      if (workspace !== undefined) {
-        await workspace.port.release({
-          scope: workspace.scope,
-          fence: this.dependencies.workspaceCheckpoints!.runtimeFence(workspace.fence, workspace.scope.environmentId),
-          binding: workspace.binding,
-        }).catch(() => undefined);
+      const trusted = this.dependencies.workspaceCheckpoints === undefined || this.workspaces.get(input)?.trusted === true;
+      let reusable = existing !== undefined
+        && this.sandboxConfigurationFingerprints.get(input) === fingerprint
+        && trusted;
+      if (reusable && this.dependencies.isSandboxCurrent !== undefined) {
+        reusable = await untilAborted(this.dependencies.isSandboxCurrent({
+          workspaceId: input.workspaceId, session: input.session, environment: input.environment,
+          runtimeGeneration: this.runtimeGenerations.get(input)!,
+        }), signal);
       }
-      await sandbox.destroy?.().catch(() => undefined);
-      throw error;
+      if (reusable) return;
+      if (existing !== undefined) {
+        const previousWorkspace = this.workspaces.get(input);
+        this.workspaces.delete(input);
+        if (previousWorkspace !== undefined) {
+          await previousWorkspace.port.release({
+            scope: previousWorkspace.scope,
+            fence: this.dependencies.workspaceCheckpoints!.runtimeFence(previousWorkspace.fence, previousWorkspace.scope.environmentId),
+            binding: previousWorkspace.binding,
+          });
+        }
+        this.abortControllers.get(input)?.abort();
+        this.abortControllers.delete(input);
+        this.sandboxes.delete(input);
+        this.sandboxRuntimes.delete(input);
+        this.runtimeGenerations.delete(input);
+        this.sandboxConfigurationFingerprints.delete(input);
+        await untilAborted(existing.destroy?.() ?? Promise.resolve(), signal);
+      }
+      this.abortControllers.set(input, startup);
+      registered = true;
+      const runtimeGeneration = this.dependencies.runtimeGenerations?.next()
+        ?? `runtime_${randomUUID()}`;
+      const context = { workspaceId: input.workspaceId, session: input.session, environment: input.environment };
+      const runtime = new SessionSandboxRuntime({
+        mode: () => this.dependencies.sandboxMode?.(context) ?? "sandbox",
+        create: () => {
+          if (signal.aborted) throw abortedError(signal);
+          return this.dependencies.buildSandbox({ ...context, signal });
+        },
+        prepare: (sandbox) => {
+          if (signal.aborted) return Promise.reject(abortedError(signal));
+          return this.dependencies.prepareSandbox?.({ ...context, sandbox, runtimeGeneration, signal }) ?? Promise.resolve();
+        },
+      });
+      const allocation = runtime.acquire();
+      const sandbox = await untilAborted(allocation, signal, async (created) => {
+        await created.destroy?.().catch(() => undefined);
+      });
+      let workspace: ManagedWorkspaceState | undefined;
+      try {
+        const checkpoints = this.dependencies.workspaceCheckpoints;
+        if (checkpoints !== undefined) {
+          const fence = input.executionFence!;
+          const scope = {
+            workspaceId: input.workspaceId,
+            environmentId: input.environment.id,
+            sessionId: input.sessionId,
+            workId: fence.executionId,
+          };
+          const active = await untilAborted(checkpoints.active(scope), signal);
+          const port = checkpoints.port(sandbox);
+          const runtimeFence = checkpoints.runtimeFence(fence, scope.environmentId);
+          const binding = await untilAborted(port.materialize({
+            scope, fence: runtimeFence, strategy: "checkpoint_restore",
+            activeCheckpoint: active?.candidate ?? null,
+            idempotencyKey: runtimeGeneration,
+            signal,
+          }), signal);
+          workspace = { port, binding, scope, fence, activeId: active?.candidate.id ?? null, trusted: true };
+          // A missing/corrupt published archive is a hard failure. Session
+          // inputs and the harness must never observe an empty replacement.
+          await untilAborted(port.attach({
+            scope, fence: runtimeFence, strategy: "checkpoint_restore", binding,
+            sandbox: { provider: "node", runtimeId: runtimeGeneration },
+            signal,
+          }), signal);
+        }
+        await untilAborted(runtime.prepare(), signal);
+      } catch (error) {
+        if (workspace !== undefined) {
+          await workspace.port.release({
+            scope: workspace.scope,
+            fence: this.dependencies.workspaceCheckpoints!.runtimeFence(workspace.fence, workspace.scope.environmentId),
+            binding: workspace.binding,
+          }).catch(() => undefined);
+        }
+        await sandbox.destroy?.().catch(() => undefined);
+        throw error;
+      }
+      if (workspace !== undefined) this.workspaces.set(input, workspace);
+      this.sandboxRuntimes.set(input, runtime);
+      this.sandboxes.set(input, sandbox);
+      this.runtimeGenerations.set(input, runtimeGeneration);
+      this.sandboxConfigurationFingerprints.set(input, fingerprint);
+    } finally {
+      unlinkParent();
+      if (registered && this.abortControllers.get(input) === startup) {
+        this.abortControllers.delete(input);
+      }
     }
-    if (workspace !== undefined) this.workspaces.set(input, workspace);
-    this.sandboxRuntimes.set(input, runtime);
-    this.sandboxes.set(input, sandbox);
-    this.runtimeGenerations.set(input, runtimeGeneration);
-    this.sandboxConfigurationFingerprints.set(input, fingerprint);
   }
 
   async stop(input: StopNodeManagedSessionRuntime): Promise<void> {
@@ -750,11 +780,3 @@ export class DefaultNodeManagedSessionRunner
   }
 }
 
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  if (ms <= 0 || signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(done, ms);
-    function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }
-    signal.addEventListener("abort", done, { once: true });
-  });
-}

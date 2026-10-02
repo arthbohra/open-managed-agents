@@ -237,13 +237,26 @@ export interface ManagedNodeHarnessRuntimeInput {
   ids: { nextEventId(): string };
 }
 
+/** History is read back `ORDER BY processed_at` (millisecond precision) and
+ * then by id. Two events stamped from one clock reading can swap when ids are
+ * unrelated. One generator is therefore strictly increasing. */
+export function createStrictlyIncreasingEventStamp(
+  clock: { now(): Date },
+): () => string {
+  let lastStampMs = Number.NEGATIVE_INFINITY;
+  return () => {
+    lastStampMs = Math.max(clock.now().getTime(), lastStampMs + 1);
+    return new Date(lastStampMs).toISOString();
+  };
+}
+
 export class ManagedNodeHarnessRuntime implements HarnessRuntime {
   readonly history: HistoryStore;
   readonly sandbox: SandboxExecutor;
   readonly abortSignal?: AbortSignal;
   private readonly applicationHistoryEvents: SessionEventView[];
   private outputChain: Promise<void> = Promise.resolve();
-  private lastStampMs = Number.NEGATIVE_INFINITY;
+  private readonly nextStamp: () => string;
   /** Number of `agent.*` events (tool calls, messages, thinking) produced so far:
    * a turn that produced none has no side effects and is safe to re-run. */
   agentEventCount = 0;
@@ -256,6 +269,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
     this.sandbox = input.sandbox;
     this.abortSignal = input.abortSignal;
     this.applicationHistoryEvents = structuredClone(input.events);
+    this.nextStamp = createStrictlyIncreasingEventStamp(input.clock);
   }
 
   broadcast = (event: SessionEvent): void => {
@@ -295,8 +309,7 @@ export class ManagedNodeHarnessRuntime implements HarnessRuntime {
    * its tool_result) could replay out of order on another owner. Stamps are
    * therefore strictly increasing within a runtime. */
   private stamp(): string {
-    this.lastStampMs = Math.max(this.input.clock.now().getTime(), this.lastStampMs + 1);
-    return new Date(this.lastStampMs).toISOString();
+    return this.nextStamp();
   }
 
   getApplicationHistoryEvents(): SessionEventView[] {

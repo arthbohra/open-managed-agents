@@ -59,6 +59,7 @@ interface RunnerConstructor {
       workspaceId: string;
       session: Session;
       environment: Environment;
+      signal?: AbortSignal;
     }): Promise<SandboxExecutor>;
     prepareSandbox?(input: {
       workspaceId: string;
@@ -66,6 +67,7 @@ interface RunnerConstructor {
       environment: Environment;
       sandbox: SandboxExecutor;
       runtimeGeneration: string;
+      signal?: AbortSignal;
     }): Promise<void>;
     synchronizeSandbox?(input: {
       workspaceId: string;
@@ -1221,5 +1223,85 @@ describe("DefaultNodeManagedSessionRunner", () => {
       reason: "deleted",
     });
     expect(destroyed).toEqual(["workspace_a", "workspace_b"]);
+  });
+
+  it("aborts sandbox acquisition when startup is cancelled and destroys a late sandbox", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let finishCreate: ((sandbox: SandboxExecutor) => void) | undefined;
+    let destroyed = false;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: () => {
+        markStarted?.();
+        return new Promise<SandboxExecutor>((resolve) => { finishCreate = resolve; });
+      },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => {} }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T04:00:00.000Z") },
+      ids: { nextEventId: () => "event_cancel_start" },
+    });
+    const controller = new AbortController();
+    const pending = runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+      signal: controller.signal,
+    });
+    await started;
+    const startedAt = Date.now();
+    controller.abort(Object.assign(new Error("interrupt_requested"), { name: "AbortError" }));
+    await expect(pending).rejects.toThrow("interrupt_requested");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    finishCreate?.({
+      destroy: async () => { destroyed = true; },
+    } as SandboxExecutor);
+    await vi.waitFor(() => { expect(destroyed).toBe(true); });
+  });
+
+  it("cancels an in-flight sandbox acquisition through runner.cancel", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: ({ signal }) => {
+        markStarted?.();
+        return new Promise<SandboxExecutor>((_resolve, reject) => {
+          const fail = () => reject(Object.assign(new Error("session_stopped"), { name: "AbortError" }));
+          if (signal?.aborted) { fail(); return; }
+          signal?.addEventListener("abort", fail, { once: true });
+        });
+      },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => {} }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T04:00:00.000Z") },
+      ids: { nextEventId: () => "event_cancel_runner" },
+    });
+    const pending = runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    await started;
+    runner.cancel({ workspaceId: "workspace_01", sessionId: session.id, reason: "session_stopped" });
+    await expect(pending).rejects.toThrow("session_stopped");
   });
 });
