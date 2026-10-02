@@ -37,7 +37,9 @@ import type {
 import { randomUUID } from "node:crypto";
 import { ScopedSessionMap } from "./scoped-session-map.js";
 
-export type StartNodeManagedSessionRuntime = StartSessionExecution;
+export type StartNodeManagedSessionRuntime = StartSessionExecution & {
+  executionFence?: SessionExecutionFence;
+};
 
 export type StopNodeManagedSessionRuntime = StopSessionExecution;
 
@@ -282,6 +284,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
           session: input.session,
           environment: input.environment,
           initialEvents: [],
+          ...(fence !== undefined && { executionFence: fence }),
         });
       } catch (error) {
         await this.projectTerminalStartFailure(input, error);

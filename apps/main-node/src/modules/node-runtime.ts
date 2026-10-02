@@ -51,6 +51,7 @@ export async function createNodeRuntime(
     memoryService,
     dreamsService,
     outputsRoot,
+    sessionOutputs,
     filesBlob,
     filesBlobDescription,
     newEventLog,
@@ -58,6 +59,7 @@ export async function createNodeRuntime(
     realtimeDescription,
     sessionRegistry,
   } = foundation;
+  const { sharedSessionOutputs } = foundation;
 
   const managed = await createManagedNodeRuntime(foundation, components, disposables);
   const {
@@ -263,6 +265,8 @@ export async function createNodeRuntime(
     memoryBlobDescription,
     memoryService,
     outputsRoot,
+    sessionOutputs,
+    sharedSessionOutputs,
     filesBlob,
     filesBlobDescription,
     newEventLog,

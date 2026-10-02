@@ -33,6 +33,8 @@ interface BS3RunResult {
   lastInsertRowid: number | bigint;
 }
 interface BS3Statement {
+  /** Better-sqlite3 marks DML ... RETURNING statements as readers. */
+  reader?: boolean;
   run(...params: unknown[]): BS3RunResult;
   get(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
@@ -85,6 +87,10 @@ class BetterSqlite3SqlStatement implements SqlStatement {
 
   /** Internal — used by BetterSqlite3SqlClient.batch to execute under tx. */
   executeRun(): SqlRunResult<unknown> {
+    if (this.stmt.reader) {
+      const rows = this.stmt.all(...this.params);
+      return { meta: { changes: rows.length }, results: rows, success: true };
+    }
     const r = this.stmt.run(...this.params);
     return {
       meta: {

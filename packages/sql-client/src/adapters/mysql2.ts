@@ -613,7 +613,14 @@ class Mysql2SqlStatement implements SqlStatement {
 
   async executeRunIn<T>(executor: MysqlExecutor): Promise<SqlRunResult<T>> {
     if (this.statement.returning !== null) {
-      throw new Error("Mysql2SqlClient.batch does not accept RETURNING statements");
+      if (!/^\s*UPDATE\b/i.test(this.statement.text)) {
+        throw new Error("Mysql2SqlClient.batch supports RETURNING only on UPDATE");
+      }
+      // Reuse the conditional UPDATE/CAS emulation on the batch's existing
+      // connection; opening a nested transaction would release the session
+      // claim row lock before the fenced mutation commits.
+      const result = await this.executeUpdateReturning<T>(executor as MysqlConnection);
+      return { meta: { changes: result.changes }, results: result.rows, success: true };
     }
     const [result] = await executor.execute(
       this.statement.text,

@@ -98,6 +98,7 @@
     "@open-managed-agents/sessions-store": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/slack": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vault-forward": "workspace:*",
     "@open-managed-agents/vault-store-sql": "workspace:*",
@@ -119,6 +120,7 @@
     "mysql2": "^3.24.4",
     "postgres": "^3.4.0",
     "prom-client": "^15.1.3",
+    "tar": "7.5.22",
     "turndown": "^7.2.0"
   },
   "devDependencies": {

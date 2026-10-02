@@ -66,7 +66,7 @@ async function buildNodeControlPlane(
   const {
     config, processMode, logger, backendDescription, platformRootSecret, sql,
     agentsService, environmentsService, sessionsService, evalsService, kv,
-    memoryService, managedSessionExecutionWorker,
+    memoryService, managedSessionExecutionWorker, sharedSessionOutputs,
   } = runtime;
 
   const app = await mountNodeHttp(runtime, disposables);
@@ -85,6 +85,8 @@ async function buildNodeControlPlane(
     },
     memory: memoryService,
     integrationsSql: platformRootSecret ? sql : null,
+    sessionOutputGarbageCollection: sharedSessionOutputs
+      ? () => sharedSessionOutputs.collectGarbage() : null,
     cron: config.cron,
   });
   disposables.add("scheduler", () => scheduler.stop());

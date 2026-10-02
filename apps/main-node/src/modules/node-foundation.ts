@@ -50,6 +50,8 @@ import { SqlAgentPersistence } from "@open-managed-agents/managed-agents-adapter
 import { resolveFeishuAgentTools } from "../lib/feishu-agent-tools.js";
 
 import { NodeWorkspaceBackupService } from "../lib/node-workspace-backup.js";
+import { NodeSharedSessionOutputs } from "../lib/node-shared-session-outputs.js";
+import { nodeOutputsAdapter } from "../lib/node-outputs-adapter.js";
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
 
 import { startMemoryBlobWatcher } from "../lib/memory-blob-watcher.js";
@@ -230,6 +232,11 @@ export async function createNodeFoundation(
 
   const filesBlob: BlobStore = components.blobs.files.store;
   const filesBlobDescription = components.blobs.files.description;
+  const sharedSessionOutputs = config.blobs.files.kind === "s3"
+    ? new NodeSharedSessionOutputs({ sql, blobs: filesBlob })
+    : undefined;
+  await sharedSessionOutputs?.ensureSchema(dialect);
+  const sessionOutputs = sharedSessionOutputs ?? nodeOutputsAdapter(outputsRoot);
 
   const workspaceBackups = new NodeWorkspaceBackupService({
     sql,
@@ -488,6 +495,8 @@ export async function createNodeFoundation(
     memoryService,
     dreamsService,
     outputsRoot,
+    sessionOutputs,
+    sharedSessionOutputs,
     filesBlob,
     filesBlobDescription,
     newEventLog,

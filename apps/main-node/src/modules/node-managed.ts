@@ -53,15 +53,15 @@ import { SqlTunnelStore } from "@open-managed-agents/tunnel-store-sql";
 import { SqlUserProfileStore } from "@open-managed-agents/user-profile-store-sql";
 import { SqlEnvironmentWorkStore, type EnvironmentWorkSecretCipher } from "@open-managed-agents/environment-work-store-sql";
 import { SqlDeploymentAgentSource, SqlDeploymentVaultSource, SqlEnvironmentPersistence, SqlFileMetadataPersistence, SqlMemoryStoreSource, SqlManagedSessionsComposition, SqlPersistedSessionEventStream, SqlReplicatedSessionEventStream, SqlSessionEnvironmentSource, SqlSessionSource, SqlSessionRuntimeProjectionPersistence } from "@open-managed-agents/managed-agents-adapters-sql";
-import { createSqlSessionRuntimeReaders, SqlSessionExecutionCoordinator } from "@open-managed-agents/session-runtime-sql";
+import { createSqlSessionRuntimeReaders, ensureSessionExecutionClaimLockSchema, SqlSessionExecutionCoordinator } from "@open-managed-agents/session-runtime-sql";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
 import { AnthropicMessagesDreamCurator, ApplicationDreamMemoryWorkspace, ModelCardCatalogSource, CronDeploymentSchedulePlanner, EnvironmentAwareSessionEventDispatchRouter, EnvironmentAwareSessionEventStreamRouter, EnvironmentAwareSessionLifecycleRouter, TimerEnvironmentWorkAvailabilityWaiter, IndeterminateCredentialValidationProbe, inProcessDreamExecutionSchedulerModule, LocalTunnelProvisioner, SealedEnvironmentWorkSessionCredentialIssuer, StandardWebhookEnvironmentWorkWakeup, DeduplicatingDreamCurator, WebCryptoTunnelCertificateAuthority, WebCryptoTunnelTokenManager, WebCryptoMemoryContentDescriptor, ZipSkillPackageCompiler, synchronizeManagedSessionMemoryWorkspaces } from "@open-managed-agents/managed-agents-adapters-runtime";
 
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 
 import { resolveFeishuAgentTools } from "../lib/feishu-agent-tools.js";
-import { nodeOutputsAdapter } from "../lib/node-outputs-adapter.js";
 import { NodeManagedSessionOutputCollector } from "../lib/node-managed-session-outputs.js";
+import { NodeManagedWorkspaceCheckpoints } from "../lib/node-managed-workspace-checkpoints.js";
 import { nodeSessionLifecycle } from "../lib/node-session-lifecycle.js";
 import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 
@@ -106,6 +106,8 @@ export async function createManagedNodeRuntime(
     modelCardsService,
     memoryBlobs,
     outputsRoot,
+    sessionOutputs,
+    sharedSessionOutputs,
     filesBlob,
     buildSandbox,
     resolveNodeModelCreds,
@@ -275,7 +277,12 @@ export async function createManagedNodeRuntime(
     },
   });
 
-  const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql);
+  if (config.workspace.strategy === "checkpoint_restore") {
+    await ensureSessionExecutionClaimLockSchema(sql, foundation.dialect);
+  }
+  const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql, {
+    serializeSessionClaims: config.workspace.strategy === "checkpoint_restore",
+  });
 
   async function isManagedSessionExecutionFenceActive(fence: {
     workspaceId: string;
@@ -302,9 +309,17 @@ export async function createManagedNodeRuntime(
   const managedSessionOutputCollector = new NodeManagedSessionOutputCollector({
     outputsRoot,
     isFenceActive: isManagedSessionExecutionFenceActive,
+    ...(sharedSessionOutputs === undefined ? {} : { shared: sharedSessionOutputs }),
   });
+  const workspaceCheckpoints = config.workspace.strategy === "checkpoint_restore"
+    ? new NodeManagedWorkspaceCheckpoints({
+        sql, blobs: filesBlob, intervalMs: config.workspace.checkpointIntervalMs,
+      })
+    : undefined;
+  await workspaceCheckpoints?.ensureSchema();
 
   const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
+    ...(workspaceCheckpoints === undefined ? {} : { workspaceCheckpoints }),
     subagentThreads: new SqlSessionThreadStore(sql),
     subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
     resolveSubagentSession: async ({ workspaceId, session, request }) => {
@@ -364,6 +379,10 @@ export async function createManagedNodeRuntime(
         session.id,
         join(config.paths.sandboxWorkdir, session.id),
       ),
+    ...(sharedSessionOutputs === undefined ? {} : {
+      isSandboxCurrent: ({ workspaceId, session, runtimeGeneration }: { workspaceId: string; session: { id: string }; runtimeGeneration: string }) =>
+        sharedSessionOutputs.isSandboxCurrent(workspaceId, session.id, runtimeGeneration),
+    }),
     prepareSandbox: async ({
       workspaceId,
       session,
@@ -371,6 +390,7 @@ export async function createManagedNodeRuntime(
       runtimeGeneration,
     }) => {
       const preparer = new NodeManagedSessionInputPreparer({
+        sharedOutputs: sharedSessionOutputs !== undefined,
         files: managedPlatform
           .app({ workspaceId })
           .port(managedAgentsPortTokens.files),
@@ -387,6 +407,10 @@ export async function createManagedNodeRuntime(
           },
         ),
       });
+      // Shared outputs are not a live mount: hydrate canonical files into a
+      // fresh sandbox before inputs are staged, so input mounts under the
+      // outputs directory win and the next turn can read prior outputs.
+      await sharedSessionOutputs?.restoreToSandbox(workspaceId, session.id, sandbox, runtimeGeneration);
       await preparer.prepare({
         workspaceId,
         session,
@@ -447,6 +471,7 @@ export async function createManagedNodeRuntime(
         sessionId: session.id,
         sandbox,
         executionFence,
+        runtimeGeneration,
       });
     },
     afterExecution: withReportedArtifactPublication(createNodeOpenAIArtifactPublisher({
@@ -608,7 +633,7 @@ export async function createManagedNodeRuntime(
   const nodeSessionLifecycleHooks = nodeSessionLifecycle({
     files: filesService,
     filesBlob,
-    outputs: nodeOutputsAdapter(outputsRoot),
+    outputs: sessionOutputs,
   });
   const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
     environments: nodeManagedEnvironments,
