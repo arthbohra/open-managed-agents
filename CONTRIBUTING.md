@@ -26,7 +26,7 @@
 <type>(<scope>): <祈使句，说明做了什么>
 ```
 
-`scope` 可省略。常用 type：`feat` `fix` `refactor` `perf` `docs` `test` `ci` `chore`。依赖用 `chore(deps):`。一篇 PR 一个 type。个别历史标题写过 `fix+feat`（#224）；新 PR 拆开，或只选一个 type。
+`scope` 可省略。常用 type：`feat` `fix` `refactor` `perf` `docs` `test` `ci` `chore`。依赖用 `chore(deps):`。一篇 PR 一个 type。近期合进去的标题也不都是这个格式：#224 是 `fix+feat(...)`；#237 是 `Workspace persistence semantics: durable_mount vs fenced checkpoint_restore, shared Session outputs`；#239 是 `CMA retry_status semantics + live-found fixes (...)`。新 PR 用单一 conventional type。
 
 发版提交的主题是 `release: vX.Y.Z`（见「发布」），普通 PR 不用这个前缀。
 
@@ -133,7 +133,7 @@ Dependabot 和手工 lockfile 更新都要做兼容性检查。CI 变绿只是�
 4. tag 触发发布：dsh `release.yml` 先确认 tag 在 `main` 上，再跑测试、dsh 兼容矩阵和 standalone smoke，然后用 npm OIDC 发布。Martty `package-npm.yml` 监听 `v*.*.*`。
 5. openma-common 是 `private: true` 的 git 依赖：打 tag 后更新消费方，不发 npm。
 
-**Changesets。** 用来发布 `@openma/cli` / `@openma/sdk`。步骤在「本仓库」。
+**Changesets。** 用来发布 `@openma/cli` / `@openma/sdk`。步骤在「本仓库」。本仓库的 `version-pr` 会跑 MySQL 集成，但没有 `Enable KVM for Litebox`；没有 `/dev/kvm` 时 Litebox 用例会失败。
 
 发版提交只含版本和 changelog。功能先进普通 PR。发版后按上一节给下游开 bump PR。
 
@@ -179,21 +179,21 @@ Workflow `CI`（`.github/workflows/ci.yml`，PR 与 `main`，job `verify`，`run
 4. `pnpm test:coverage:protocol`
 5. `pnpm test:integration:storage` — Testcontainers + MinIO（Chainguard 镜像，#227）
 6. `Enable KVM for Litebox`
-7. `pnpm test:integration:mysql` — Testcontainers `mysql:8.4`（`apps/main-node/vitest.mysql.config.ts`）。最近一次跑完这一步的 main CI 是 [#237 的 run 36998373962](https://github.com/openma-ai/open-managed-agents/actions/runs/36998373962)（head `0d5c5f00`）：**2 files / 16 tests**。`test/persistence.mysql.integration.ts` 6 tests，`test/main-node.mysql.integration.ts` 10 tests。#239 没有改 `ci.yml` 或这两个文件。
+7. `pnpm test:integration:mysql` — Testcontainers `mysql:8.4`（`apps/main-node/vitest.mysql.config.ts`）。套件是 `test/persistence.mysql.integration.ts` 和 `test/main-node.mysql.integration.ts`。2026-10-02，#237 合并后的 [CI run 36998373962](https://github.com/openma-ai/open-managed-agents/actions/runs/36998373962)（head `0d5c5f00`）测得 **2 files / 16 tests**（6 + 10）。#239 没有改 `ci.yml` 或这两个文件。这不是一条会自动更新的「最新 run」指针。
 
 **KVM。** 步骤注释写明：ubuntu-24.04 runner 上有 `/dev/kvm`，属主 `root:kvm`，模式 `0660`，runner 用户不在 `kvm` 组。`Enable KVM for Litebox` 在 MySQL 之前执行。设备不存在就报错并让 job 失败，MySQL 不会跑。它写入 udev 规则，再 `chmod 666 /dev/kvm`。`chmod` 失败，或当前用户最终不是既可读又可写，同样失败。
 
-`pnpm test:integration:mysql` 里，`apps/main-node/test/persistence.mysql.integration.ts` 的 “runs official /v1/sessions on two real Node owners…”（#237）会启动两个真实 Node owner，`SANDBOX_PROVIDER=litebox`。在 Linux 上它要求 `/dev/kvm` 可读可写，跑的是真实 Litebox microVM。这不是 Haven，不是托管环境，也不是 boxrun（另一台机器上的 `boxlite serve`）。同一文件里其余用例是 MySQL + MinIO 上的独立 actor 进程，不起 microVM。`main-node.mysql.integration.ts` 把被测服务的 `OPENMA_TEST_SANDBOX_PROVIDER` 设为 `local-subprocess`，也不是 Litebox。
+`pnpm test:integration:mysql` 里，`apps/main-node/test/persistence.mysql.integration.ts` 的 “runs official /v1/sessions on two real Node owners…”（#237）会启动两个真实 Node owner，`SANDBOX_PROVIDER=litebox`。在 Linux 上它要求 `/dev/kvm` 可读可写。真实的是 Litebox 沙箱。模型不是上游 LLM：两个 owner 的 `ANTHROPIC_API_KEY` 是 `fixture`，`ANTHROPIC_BASE_URL` 指向测试进程在 `127.0.0.1` 上起的 SSE 服务器，按脚本回放 `tool_use` 和文本。这不是 Haven，不是托管环境，也不是 boxrun（另一台机器上的 `boxlite serve`）。同一文件里其余用例是 MySQL + MinIO 上的独立 actor 进程，不起 microVM。`main-node.mysql.integration.ts` 把被测服务的 `OPENMA_TEST_SANDBOX_PROVIDER` 设为 `local-subprocess`，也不是 Litebox。
 
-`packages/sandbox-adapter-litebox` 的单测仍然 `vi.mock("@boxlite-ai/boxlite")`，不打开 `/dev/kvm`。`pnpm test` 里这份通过，不能当成 microVM 已经跑过。
-
-`Release` 的 `version-pr` 也会跑 `pnpm test:integration:mysql`，那个 workflow 里没有 `Enable KVM for Litebox`。
+`packages/sandbox-adapter-litebox` 的单测仍然 `vi.mock("@boxlite-ai/boxlite")`，不打开 `/dev/kvm`。`pnpm test` 里这份通过，不能当成 microVM 已经跑过。`Release` 的 `version-pr` 见下面的表。
 
 | Workflow | 何时跑 | Job |
 |---|---|---|
-| `Build OpenMA Server Image` | server 相关路径的 PR，以及 `main` | `verify`（main-node / main-fly 的 typecheck 与 test，console build），`build`（GHCR；PR 只构建不推送）。tag `openma-server-v*` 增加版本别名 |
+| `Build OpenMA Server Image` | server 相关路径上的 PR；`main` 上同一组路径的 push；tag `openma-server-v*`；`workflow_dispatch` | `verify`（main-node / main-fly 的 typecheck 与 test，console build），`build`（GHCR；PR 只构建不推送。tag 增加版本别名） |
 | `Build Sandbox Base Image` | `main` 上改了 `apps/agent/Dockerfile`，或手动触发 | `build`，推到 Docker Hub |
-| `Release` | 仅 `main` 的 push，以及 `workflow_dispatch` | `version-pr`、`publish` |
+| `Release` | 仅 `main` 的 push，以及 `workflow_dispatch` | `version-pr`、`publish`。`version-pr` 跑 MySQL 集成，但没有 KVM 步骤，见下 |
+
+`release.yml` 的 `version-pr` 在 `ubuntu-latest` 上跑 `pnpm typecheck`、`pnpm test`、storage 和 `pnpm test:integration:mysql`，没有 `Enable KVM for Litebox`。没有可读可写的 `/dev/kvm` 时，两 owner 的 Litebox 用例会失败。自 #237 起这条 workflow 没有完整跑完：[#237 的 run 36998373909](https://github.com/openma-ai/open-managed-agents/actions/runs/36998373909) 在任何 job 开始前被取消；[#239 的 run 37004877345](https://github.com/openma-ai/open-managed-agents/actions/runs/37004877345) 在 2026-10-02 核对时仍是 pending，jobs 为空。
 
 `@openma/cli` 与 `@openma/sdk` 用 changesets，细节在 [`docs/release-process.md`](docs/release-process.md)：
 
