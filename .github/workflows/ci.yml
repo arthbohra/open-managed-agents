@@ -3,7 +3,10 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # feat/persistence-semantics is listed so one push of the KVM fix starts a
+    # second verify run. The pull_request run uses refs/pull/*/merge, which is
+    # a different concurrency group, so the two runs do not cancel each other.
+    branches: [main, feat/persistence-semantics]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
