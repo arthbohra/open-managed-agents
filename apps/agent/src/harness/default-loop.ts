@@ -396,6 +396,11 @@ export class DefaultHarness implements HarnessInterface {
       // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
       // per-step latch; reset on each onStepStart.
       let stepStartId: string | null = null;
+      // streamText reports provider failures (429/5xx, stream errors) only via
+      // onError; consumeStream() swallows them and the result then either
+      // looks like an empty successful turn or rejects with AI SDK's generic
+      // NoOutputGeneratedError. Keep the real error so the turn fails with it.
+      let streamError: unknown;
       let stepSawFirstChunk = false;
 
       const streamStartedAt = Date.now();
@@ -644,6 +649,7 @@ export class DefaultHarness implements HarnessInterface {
       },
 
       onError: ({ error }) => {
+        streamError ??= error;
         // streamText aborts the stream on error before onStepFinish can fire
         // for the failing step. Without closing here, the span.model_request_start
         // we emitted in the start-step chunk hangs unpaired. Mirror the
@@ -720,6 +726,7 @@ export class DefaultHarness implements HarnessInterface {
       // we read final fields.
       try {
         await r.consumeStream();
+        if (streamError !== undefined) throw streamError;
       } catch (err) {
         // Mid-stream abort (user.interrupt, abort signal trip). The
         // streams table has chunks accumulated so far; if we don't
