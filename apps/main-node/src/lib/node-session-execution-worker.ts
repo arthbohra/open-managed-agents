@@ -19,6 +19,8 @@ import {
   emitDbBoundaryLog,
   withDbBoundary,
 } from "@open-managed-agents/sql-client";
+import { Effect, Fiber } from "effect";
+import { interruptFiber, runSupervised } from "./supervised-fiber.js";
 
 export interface RunNodeSessionExecution extends AcceptedSessionEvents {
   executionId: string;
@@ -77,7 +79,7 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
   readonly #maxConcurrent: number;
   readonly #active = new Map<string, ActiveExecution>();
   #polling: Promise<void> | null = null;
-  #pollTimer: ReturnType<typeof setInterval> | null = null;
+  #pollFiber: Fiber.RuntimeFiber<void, never> | null = null;
 
   constructor(
     private readonly dependencies: NodeSessionExecutionWorkerDependencies,
@@ -95,19 +97,28 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
   }
 
   start(): void {
-    if (this.#pollTimer !== null) return;
-    this.#pollTimer = setInterval(
-      () => this.#pollInBackground(),
-      this.#pollIntervalMs,
+    if (this.#pollFiber !== null) return;
+    this.#pollFiber = runSupervised(
+      Effect.gen(this, function* () {
+        while (true) {
+          yield* Effect.tryPromise({
+            try: () => this.poll(),
+            catch: (error: unknown) => error,
+          }).pipe(Effect.catchAll((error) => Effect.sync(() => {
+            this.#reportError(error);
+          })));
+          yield* Effect.sleep(this.#pollIntervalMs);
+        }
+      }),
+      (error) => this.#reportError(error),
     );
-    this.#pollTimer.unref?.();
-    this.#pollInBackground();
   }
 
   stop(): void {
-    if (this.#pollTimer === null) return;
-    clearInterval(this.#pollTimer);
-    this.#pollTimer = null;
+    const fiber = this.#pollFiber;
+    if (fiber === null) return;
+    this.#pollFiber = null;
+    void interruptFiber(fiber);
   }
 
   async sessionEventsAccepted(input: AcceptedSessionEvents): Promise<void> {
@@ -224,21 +235,49 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
         promise: Promise.resolve(),
       };
       this.#active.set(key, active);
-      active.promise = this.#run(active).finally(() => {
-        if (this.#active.get(key) === active) this.#active.delete(key);
-        this.#pollInBackground();
-      }).catch((error) => this.#reportError(error));
+      const fiber = runSupervised(
+        Effect.tryPromise({
+          try: () => this.#run(active),
+          catch: (error: unknown) => error,
+        }).pipe(
+          Effect.ensuring(Effect.sync(() => {
+            if (this.#active.get(key) === active) this.#active.delete(key);
+            this.#pollInBackground();
+          })),
+          Effect.catchAll((error) => Effect.sync(() => {
+            this.#reportError(error);
+          })),
+        ),
+        (error) => this.#reportError(error),
+      );
+      active.promise = Effect.runPromise(Fiber.join(fiber)).then(
+        () => undefined,
+        (error: unknown) => {
+          this.#reportError(error);
+        },
+      );
     }
   }
 
   async #run(active: ActiveExecution): Promise<void> {
-    let heartbeatChain = Promise.resolve();
-    const heartbeat = setInterval(() => {
-      heartbeatChain = heartbeatChain
-        .then(() => this.#heartbeat(active))
-        .catch((error) => this.#loseLease(active, error));
-    }, this.#heartbeatIntervalMs);
-    heartbeat.unref?.();
+    const heartbeat = runSupervised(
+      Effect.gen(this, function* () {
+        while (!active.leaseLost) {
+          yield* Effect.sleep(this.#heartbeatIntervalMs);
+          if (active.leaseLost) return;
+          yield* Effect.tryPromise({
+            try: () => this.#heartbeat(active),
+            catch: (error: unknown) => error,
+          }).pipe(Effect.catchAll((error) => Effect.tryPromise({
+            try: () => this.#loseLease(active, error),
+            catch: (cancelError: unknown) => cancelError,
+          }).pipe(Effect.catchAll((cancelError) => Effect.sync(() => {
+            this.#reportError(cancelError);
+          })))));
+        }
+      }),
+      (error) => this.#reportError(error),
+    );
     let outcome: "completed" | "failed" | "cancelled" = "completed";
     let failure: string | undefined;
     try {
@@ -264,8 +303,7 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
       outcome = active.cancelled ? "cancelled" : "failed";
       failure = errorMessage(error);
     } finally {
-      clearInterval(heartbeat);
-      await heartbeatChain;
+      await interruptFiber(heartbeat);
     }
     if (active.leaseLost) return;
     try {
@@ -352,7 +390,16 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
   }
 
   #pollInBackground(): void {
-    void this.poll().catch((error) => this.#reportError(error));
+    const polling = this.poll();
+    runSupervised(
+      Effect.tryPromise({
+        try: () => polling,
+        catch: (error: unknown) => error,
+      }).pipe(Effect.catchAll((error) => Effect.sync(() => {
+        this.#reportError(error);
+      }))),
+      (error) => this.#reportError(error),
+    );
   }
 
   #reportError(error: unknown): void {

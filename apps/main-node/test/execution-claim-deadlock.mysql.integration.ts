@@ -284,6 +284,96 @@ describe("MySQL execution claim/renew/settle concurrency", () => {
     });
     expect((captured?.retryCount ?? 0) + (captured?.outcome === "error" ? 1 : 0)).toBeGreaterThan(0);
   }, 60_000);
+
+  it("keeps the worker fiber alive when a real renew blocks past the heartbeat", async () => {
+    const sql = await createMysql2SqlClient(url, { connectionLimit: 4 });
+    const workspaceId = `ws_fiber_${randomUUID()}`;
+    const raw = await mysql.createConnection(url);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on("unhandledRejection", onRejection);
+    let release: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => { release = resolve; });
+    const cancellations: string[] = [];
+    const errors: string[] = [];
+    try {
+      const coordinator = new SqlSessionExecutionCoordinator(sql, { serializeSessionClaims: true });
+      const admittedAt = new Date().toISOString();
+      await coordinator.admit({
+        execution: execution(workspaceId, "session_fiber", "exec_fiber", "sthr_primary", admittedAt),
+      });
+      const claimed = await coordinator.claim({
+        workspaceId,
+        ownerId: "owner_seed",
+        attemptId: "seed_fiber",
+        claimedAt: admittedAt,
+        leaseTtlMs: 60_000,
+      });
+      expect(claimed.type).toBe("claimed");
+      if (claimed.type !== "claimed") return;
+      await raw.beginTransaction();
+      await raw.query(
+        "UPDATE managed_session_executions SET revision = revision + 1 WHERE workspace_id = ? AND id = ?",
+        [workspaceId, "exec_fiber"],
+      );
+      let claims = 0;
+      const worker = new NodeSessionExecutionWorker({
+        coordinator: {
+          ...coordinator,
+          admit: coordinator.admit.bind(coordinator),
+          claim: async () => {
+            claims += 1;
+            return claims === 1 ? claimed : { type: "empty" as const };
+          },
+          find: coordinator.find.bind(coordinator),
+          requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+          cancelSession: coordinator.cancelSession.bind(coordinator),
+          settle: coordinator.settle.bind(coordinator),
+          renew: coordinator.renew.bind(coordinator),
+        },
+        context: { find: async () => ({ session: {} as never, environment: {} as never, revision: 1 }) },
+        runtime: {
+          run: async () => { await running; },
+          cancel: async (input) => { cancellations.push(input.reason); },
+        },
+        ownerId: "worker_fiber",
+        clock: { now: () => new Date() },
+        ids: { nextAttemptId: () => `fiber_${randomUUID()}` },
+        leaseTtlMs: 60_000,
+        heartbeatIntervalMs: 200,
+        pollIntervalMs: 1_000,
+        maxConcurrent: 1,
+        onError: (error) => { errors.push((error as { _tag?: string })._tag ?? error.message); },
+      });
+      await worker.poll();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const timeoutLog = boundaryLogs.find((entry) =>
+        entry.op === "session_execution.heartbeat" && entry.errorTag === "Timeout" && entry.sessionId === "session_fiber",
+      );
+      writeFileSync("/tmp/oma-fiber-timeout.json", JSON.stringify({ timeoutLog, errors, cancellations, rejections: rejections.length }, null, 2));
+      console.log(JSON.stringify({ msg: "db.boundary", ...timeoutLog }));
+      expect(timeoutLog).toMatchObject({
+        op: "session_execution.heartbeat",
+        sessionId: "session_fiber",
+        timeoutMs: 200,
+        outcome: "error",
+        errorTag: "Timeout",
+      });
+      expect(cancellations).not.toContain("lease_lost");
+      expect(rejections).toEqual([]);
+      expect(errors).toContain("Timeout");
+      release?.();
+      await raw.rollback();
+      await worker.waitForIdle();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      release?.();
+      await raw.rollback().catch(() => undefined);
+      await raw.end().catch(() => undefined);
+      await sql.prepare("DELETE FROM managed_session_executions WHERE workspace_id = ?").bind(workspaceId).run().catch(() => undefined);
+      await sql.close().catch(() => undefined);
+    }
+  }, 30_000);
 });
 
 function positiveInt(value: string | undefined, fallback: number): number {
