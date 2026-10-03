@@ -948,6 +948,9 @@ importers:
       croner:
         specifier: ^9.0.0
         version: 9.1.0
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
       fflate:
         specifier: ^0.8.2
         version: 0.8.2
@@ -3721,6 +3724,9 @@ importers:
       '@open-managed-agents/sql-client':
         specifier: workspace:*
         version: link:../sql-client
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
     devDependencies:
       better-sqlite3:
         specifier: ^13.0.3
@@ -3913,8 +3919,14 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
     devDependencies:
       '@testcontainers/mysql':
+        specifier: ^12.1.0
+        version: 12.1.0
+      '@testcontainers/postgresql':
         specifier: ^12.1.0
         version: 12.1.0
       '@types/node':

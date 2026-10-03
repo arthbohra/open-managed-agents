@@ -139,6 +139,7 @@ export default defineConfig({
       { find: "@open-managed-agents/services", replacement: "./packages/services/src/index.ts" },
 
       // ─── sql-client ───────────────────────────────────────────────────
+      { find: "@open-managed-agents/sql-client/db-errors", replacement: "./packages/sql-client/src/db-errors.ts" },
       { find: "@open-managed-agents/sql-client/adapters/cf-do", replacement: "./packages/sql-client/src/adapters/cf-do.ts" },
       { find: "@open-managed-agents/sql-client/adapters/cf-d1", replacement: "./packages/sql-client/src/adapters/cf-d1.ts" },
       { find: "@open-managed-agents/sql-client", replacement: "./packages/sql-client/src/index.ts" },
@@ -384,6 +385,7 @@ export default defineConfig({
   test: {
     testTimeout: 30000,
     hookTimeout: 30000,
+    globalSetup: ["./test/integration/oauth-mcp-local-server.global.ts"],
     // bash-parser is an old CommonJS package with extensionless transitive
     // requires. workerd's module loader cannot resolve that shape directly,
     // so pre-bundle the complete package instead of relying on whichever

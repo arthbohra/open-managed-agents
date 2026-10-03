@@ -55,7 +55,7 @@ import { SqlEnvironmentWorkStore, type EnvironmentWorkSecretCipher } from "@open
 import { SqlDeploymentAgentSource, SqlDeploymentVaultSource, SqlEnvironmentPersistence, SqlFileMetadataPersistence, SqlMemoryStoreSource, SqlManagedSessionsComposition, SqlPersistedSessionEventStream, SqlReplicatedSessionEventStream, SqlSessionEnvironmentSource, SqlSessionSource, SqlSessionRuntimeProjectionPersistence } from "@open-managed-agents/managed-agents-adapters-sql";
 import { createSqlSessionRuntimeReaders, ensureSessionExecutionClaimLockSchema, SqlSessionExecutionCoordinator } from "@open-managed-agents/session-runtime-sql";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
-import { AnthropicMessagesDreamCurator, ApplicationDreamMemoryWorkspace, ModelCardCatalogSource, CronDeploymentSchedulePlanner, EnvironmentAwareSessionEventDispatchRouter, EnvironmentAwareSessionEventStreamRouter, EnvironmentAwareSessionLifecycleRouter, TimerEnvironmentWorkAvailabilityWaiter, IndeterminateCredentialValidationProbe, inProcessDreamExecutionSchedulerModule, LocalTunnelProvisioner, SealedEnvironmentWorkSessionCredentialIssuer, StandardWebhookEnvironmentWorkWakeup, DeduplicatingDreamCurator, WebCryptoTunnelCertificateAuthority, WebCryptoTunnelTokenManager, WebCryptoMemoryContentDescriptor, ZipSkillPackageCompiler, synchronizeManagedSessionMemoryWorkspaces } from "@open-managed-agents/managed-agents-adapters-runtime";
+import { AnthropicMessagesDreamCurator, ApplicationDreamMemoryWorkspace, ModelCardCatalogSource, CronDeploymentSchedulePlanner, EnvironmentAwareSessionEventDispatchRouter, EnvironmentAwareSessionEventStreamRouter, EnvironmentAwareSessionLifecycleRouter, TimerEnvironmentWorkAvailabilityWaiter, McpOAuthCredentialValidationProbe, inProcessDreamExecutionSchedulerModule, LocalTunnelProvisioner, SealedEnvironmentWorkSessionCredentialIssuer, StandardWebhookEnvironmentWorkWakeup, DeduplicatingDreamCurator, WebCryptoTunnelCertificateAuthority, WebCryptoTunnelTokenManager, WebCryptoMemoryContentDescriptor, ZipSkillPackageCompiler, synchronizeManagedSessionMemoryWorkspaces } from "@open-managed-agents/managed-agents-adapters-runtime";
 
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 
@@ -282,6 +282,11 @@ export async function createManagedNodeRuntime(
   }
   const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql, {
     serializeSessionClaims: config.workspace.strategy === "checkpoint_restore",
+    sweepIntervalMs: 5_000,
+    onError: (error, op) => logger.error(
+      { err: error, op },
+      "session execution sweep failed",
+    ),
   });
 
   async function isManagedSessionExecutionFenceActive(fence: {
@@ -979,7 +984,7 @@ export async function createManagedNodeRuntime(
       return { plaintext: await managedCredentialCrypto.decrypt(ciphertext) };
     },
   };
-  const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
+  const managedCredentialValidation = new McpOAuthCredentialValidationProbe();
   const managedCredentialStore = new SqlCredentialStore(sql, managedCredentialCipher);
   // One managed platform graph per process. Every official application
   // module is installed on the same workspace App, so a workspace has one

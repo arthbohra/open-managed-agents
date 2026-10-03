@@ -9,6 +9,7 @@ import type {
 } from "@open-managed-agents/session-runtime-contract/coordination";
 import {
   createBetterSqlite3SqlClient,
+  Deadlock,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
 import {
@@ -119,24 +120,47 @@ describe("SqlSessionExecutionCoordinator", () => {
     expect(result.type).toBe("claimed");
   });
 
-  it("retries a rolled-back MySQL deadlock during concurrent serialized Session claim", async () => {
+  it("leaves a queued execution in place when the serial claim transaction deadlocks", async () => {
     let attempts = 0;
     const retryingSql: SqlClient = {
       prepare: (statement) => sql.prepare(statement),
       exec: (statement) => sql.exec(statement),
-      batch: async (statements) => {
+      batch: async () => {
         attempts++;
-        if (attempts === 2) throw Object.assign(new Error("Deadlock found when trying to get lock"), { code: "ER_LOCK_DEADLOCK", errno: 1213 });
-        return sql.batch(statements);
+        throw new Deadlock({ op: "session_execution.claim", sessionId: "session_01" });
       },
     };
     const retrying = new SqlSessionExecutionCoordinator(retryingSql, { serializeSessionClaims: true });
     await retrying.admit(admitted("deadlock", "session_01", at(1)));
-    const claimed = await retrying.claim({ ownerId: "recovered", attemptId: "recovered_attempt",
-      claimedAt: at(2), leaseTtlMs: 10_000 });
-    expect(claimed.type).toBe("claimed");
-    expect(attempts).toBe(4);
-    if (claimed.type === "claimed") expect(claimed.execution.attemptCount).toBe(1);
+    await expect(retrying.claim({
+      ownerId: "recovered",
+      attemptId: "recovered_attempt",
+      claimedAt: at(2),
+      leaseTtlMs: 10_000,
+    })).rejects.toBeInstanceOf(Deadlock);
+    expect(attempts).toBe(1);
+    await expect(retrying.find({
+      workspaceId: "workspace_01",
+      executionId: "deadlock",
+    })).resolves.toMatchObject({ state: "queued" });
+  });
+
+  it("adds claim-lock version columns onto an older mutex table", async () => {
+    await sql.exec("DROP TABLE managed_session_claim_locks");
+    await sql.exec(`CREATE TABLE managed_session_claim_locks (
+      workspace_id VARCHAR(191) NOT NULL,
+      session_id VARCHAR(191) NOT NULL,
+      claim_token VARCHAR(191) NOT NULL,
+      PRIMARY KEY (workspace_id, session_id)
+    )`);
+    const { upgradeSessionClaimLockColumns } = await import("../src/coordination");
+    await upgradeSessionClaimLockColumns(sql);
+    const columns = await sql.prepare(
+      "PRAGMA table_info(managed_session_claim_locks)",
+    ).all<{ name: string }>();
+    expect(columns.results?.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["version", "holder_execution_id", "claim_token"]),
+    );
   });
 
   it("serializes opted-in cross-lane claims across owners without changing default lane concurrency", async () => {
