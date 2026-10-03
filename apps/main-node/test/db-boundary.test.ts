@@ -20,14 +20,9 @@ describe("db boundary retry", () => {
       timeoutMs: 30,
     }, () => retryTransientDb(async () => {
       calls += 1;
-      if (calls < 3) {
-        throw Object.assign(new Error("Deadlock found when trying to get lock"), {
-          errno: 1213,
-          code: "ER_LOCK_DEADLOCK",
-        });
-      }
+      if (calls < 3) throw new Deadlock({ op: "session_execution.renew", sessionId: "session_01" });
       return "ok";
-    }, { sql: "UPDATE managed_session_executions SET lease_expires_at_ms = ?" }));
+    }));
     expect(value).toBe("ok");
     expect(calls).toBe(3);
     expect(logs).toEqual([expect.objectContaining({
@@ -47,10 +42,7 @@ describe("db boundary retry", () => {
     await expect(withDbBoundary({ op: "session_execution.settle", sessionId: "session_02" }, () =>
       retryTransientDb(async () => {
         calls += 1;
-        throw Object.assign(new Error("Deadlock found when trying to get lock"), {
-          errno: 1213,
-          code: "ER_LOCK_DEADLOCK",
-        });
+        throw new Deadlock({ op: "session_execution.settle", sessionId: "session_02" });
       }),
     )).rejects.toBeInstanceOf(Deadlock);
     expect(calls).toBe(5);

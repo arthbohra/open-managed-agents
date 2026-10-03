@@ -144,9 +144,7 @@ export function isTaggedDbError(error: unknown): error is TaggedDbError {
 
 export function isTransientDbError(error: unknown): boolean {
   const tag = errorTag(error);
-  if (tag !== undefined && transientTags.has(tag)) return true;
-  const mysql = driverCode(error);
-  return mysql.deadlock || mysql.lockWait || mysql.connection;
+  return tag !== undefined && transientTags.has(tag);
 }
 
 export function isCasConflict(error: unknown): boolean {
@@ -158,42 +156,11 @@ export function isLeaseSafeFailure(error: unknown): boolean {
   return isTransientDbError(error) || errorTag(error) === "Timeout";
 }
 
-function driverCode(error: unknown): {
-  deadlock: boolean;
-  lockWait: boolean;
-  connection: boolean;
-} {
-  const current = error as { errno?: number; code?: string; cause?: unknown };
-  const errno = current?.errno;
-  const code = current?.code;
-  const deadlock = errno === 1213 || code === "ER_LOCK_DEADLOCK";
-  const lockWait = errno === 1205 || code === "ER_LOCK_WAIT_TIMEOUT";
-  const connection = errno === 2006 || errno === 2013 || errno === 1053 ||
-    code === "PROTOCOL_CONNECTION_LOST" ||
-    code === "ECONNRESET" ||
-    code === "ECONNREFUSED" ||
-    code === "EPIPE" ||
-    code === "ETIMEDOUT" ||
-    code === "CR_SERVER_LOST" ||
-    code === "CR_SERVER_GONE_ERROR" ||
-    code === "PROTOCOL_ENQUEUE_AFTER_QUIT" ||
-    code === "PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR";
-  if (deadlock || lockWait || connection || current?.cause === undefined) {
-    return { deadlock, lockWait, connection };
-  }
-  const nested = driverCode(current.cause);
-  return {
-    deadlock: deadlock || nested.deadlock,
-    lockWait: lockWait || nested.lockWait,
-    connection: connection || nested.connection,
-  };
-}
-
 function contextFields(hints?: { sql?: string }): DbErrorFields {
   const store = boundaries.getStore();
   const sql = hints?.sql?.slice(0, 500);
   return {
-    op: store?.op ?? "mysql",
+    op: store?.op ?? "sql",
     ...(store?.sessionId !== undefined ? { sessionId: store.sessionId } : {}),
     ...(store?.sandboxId !== undefined ? { sandboxId: store.sandboxId } : {}),
     ...(store?.timeoutMs !== undefined ? { timeoutMs: store.timeoutMs } : {}),
@@ -201,17 +168,25 @@ function contextFields(hints?: { sql?: string }): DbErrorFields {
   };
 }
 
-export function classifySqlDriverError(
-  error: unknown,
-  hints?: { sql?: string },
-): unknown {
-  if (isTaggedDbError(error)) return error;
-  const fields = { ...contextFields(hints), cause: error };
-  const mysql = driverCode(error);
-  if (mysql.deadlock) return new Deadlock(fields);
-  if (mysql.lockWait) return new LockWaitTimeout(fields);
-  if (mysql.connection) return new ConnectionLost(fields);
-  return error;
+export function dbErrorFields(cause: unknown, hints?: { sql?: string }): DbErrorFields {
+  return { ...contextFields(hints), cause };
+}
+
+/** Adapter-owned translation of one native driver error into a tagged error. */
+export type SqlErrorTranslator = (error: unknown, hints?: { sql?: string }) => unknown;
+
+/**
+ * One retry wrapper for every adapter. `translate` is the only driver-specific
+ * piece: it turns that driver's native error into a tagged error before the
+ * shared schedule decides whether to run the whole operation again.
+ */
+export function driverRetry(translate: SqlErrorTranslator) {
+  return function retry<A>(
+    operation: () => Promise<A>,
+    hints?: { sql?: string },
+  ): Promise<A> {
+    return retryTransientDb(operation, { ...hints, translate });
+  };
 }
 
 function noteRetries(count: number, tag: string | undefined): void {
@@ -223,19 +198,22 @@ function noteRetries(count: number, tag: string | undefined): void {
 }
 
 /**
- * Retry a whole transaction (or one autocommit statement) on 1213, 1205,
- * and lost connections. Emits nothing by itself: the surrounding
- * {@link withDbBoundary} writes one summary record.
+ * Retry one whole operation — a transaction or a single autocommit
+ * statement — when `translate` returns a transient tagged error.
+ * Emits nothing by itself: the surrounding {@link withDbBoundary}
+ * writes one summary record.
  */
 export async function retryTransientDb<A>(
   operation: () => Promise<A>,
-  hints?: { sql?: string },
+  options?: { sql?: string; translate?: SqlErrorTranslator },
 ): Promise<A> {
+  const hints = options?.sql !== undefined ? { sql: options.sql } : undefined;
+  const translate = options?.translate ?? ((error: unknown) => error);
   const failures = { n: 0, tag: undefined as string | undefined };
   const program = Effect.retry(
     Effect.tryPromise({
       try: operation,
-      catch: (error: unknown) => classifySqlDriverError(error, hints),
+      catch: (error: unknown) => translate(error, hints),
     }),
     {
       schedule: transientDbRetrySchedule,

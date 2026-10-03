@@ -406,7 +406,8 @@ export class SqlSessionExecutionStore
 
   /**
    * Optimistic retries when another replica won the same candidate.
-   * Driver deadlocks are retried inside the MySQL adapter, not here.
+   * Transient driver failures are already tagged and retried inside the
+   * SQL adapter. This loop only repeats a CasConflict.
    * A per-execution CAS is not enough for serial mode: the versioned
    * session lock row is the mutex, so two lanes cannot both commit.
    */

@@ -6,7 +6,10 @@
 // stores therefore stay behind their existing Ports and never branch on a
 // concrete database.
 
-import { retryTransientDb } from "../db-errors";
+import { driverRetry } from "../db-errors";
+import { translateMysql2Error } from "./mysql2-errors";
+
+const retryMysql = driverRetry(translateMysql2Error);
 import type {
   SqlClient,
   SqlRunResult,
@@ -574,7 +577,7 @@ class Mysql2SqlStatement implements SqlStatement {
         success: true,
       };
     }
-    return retryTransientDb(
+    return retryMysql(
       () => this.executeRunIn<T>(this.executor),
       { sql: this.statement.text },
     );
@@ -585,7 +588,7 @@ class Mysql2SqlStatement implements SqlStatement {
       const result = await this.executeReturning<T>();
       return result.rows[0] ?? null;
     }
-    return retryTransientDb(async () => {
+    return retryMysql(async () => {
       const [result] = await this.executor.execute(
         this.statement.text,
         this.executionParams(),
@@ -600,7 +603,7 @@ class Mysql2SqlStatement implements SqlStatement {
       const result = await this.executeReturning<T>();
       return { results: result.rows, meta: { changes: result.changes } };
     }
-    return retryTransientDb(async () => {
+    return retryMysql(async () => {
       const [result] = await this.executor.execute(
         this.statement.text,
         this.executionParams(),
@@ -648,7 +651,7 @@ class Mysql2SqlStatement implements SqlStatement {
   }
 
   private executeReturning<T>(): Promise<{ rows: T[]; changes: number }> {
-    return retryTransientDb(
+    return retryMysql(
       () => this.executeReturningOnce<T>(),
       { sql: this.statement.text },
     );
@@ -783,7 +786,7 @@ export class Mysql2SqlClient implements SqlClient {
       )
       .filter((text) => text.length > 0)
       .join(";\n");
-    return retryTransientDb(() => this.batchOnce<T>(statements), { sql });
+    return retryMysql(() => this.batchOnce<T>(statements), { sql });
   }
 
   private async batchOnce<T = unknown>(

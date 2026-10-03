@@ -31,7 +31,8 @@ export {
   NotFound,
   Timeout,
   annotateDbBoundary,
-  classifySqlDriverError,
+  dbErrorFields,
+  driverRetry,
   emitDbBoundaryLog,
   isCasConflict,
   isLeaseSafeFailure,
@@ -45,5 +46,6 @@ export {
   type DbBoundaryLog,
   type DbBoundaryLogger,
   type DbErrorFields,
+  type SqlErrorTranslator,
   type TaggedDbError,
 } from "./db-errors";

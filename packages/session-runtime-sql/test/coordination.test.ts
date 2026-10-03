@@ -9,6 +9,7 @@ import type {
 } from "@open-managed-agents/session-runtime-contract/coordination";
 import {
   createBetterSqlite3SqlClient,
+  Deadlock,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
 import {
@@ -126,10 +127,7 @@ describe("SqlSessionExecutionCoordinator", () => {
       exec: (statement) => sql.exec(statement),
       batch: async () => {
         attempts++;
-        throw Object.assign(new Error("Deadlock found when trying to get lock"), {
-          code: "ER_LOCK_DEADLOCK",
-          errno: 1213,
-        });
+        throw new Deadlock({ op: "session_execution.claim", sessionId: "session_01" });
       },
     };
     const retrying = new SqlSessionExecutionCoordinator(retryingSql, { serializeSessionClaims: true });
@@ -139,7 +137,7 @@ describe("SqlSessionExecutionCoordinator", () => {
       attemptId: "recovered_attempt",
       claimedAt: at(2),
       leaseTtlMs: 10_000,
-    })).rejects.toMatchObject({ errno: 1213 });
+    })).rejects.toBeInstanceOf(Deadlock);
     expect(attempts).toBe(1);
     await expect(retrying.find({
       workspaceId: "workspace_01",
