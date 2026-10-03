@@ -424,6 +424,10 @@ export default defineConfig({
       // test:architecture, not inside workerd/Vitest.
       "scripts/provider-package-boundaries.test.mjs",
       "scripts/migration-compatibility.test.mjs",
+      "scripts/release-check.test.mjs",
+      // Needs full git history and tags. The release-check CI job runs it;
+      // workerd cannot import node:child_process from this file.
+      "scripts/release-check.history.test.mjs",
       "scripts/setup-cf.test.mjs",
       "scripts/setup-fly.test.mjs",
       // Credential certification orchestrates real Node child processes and
