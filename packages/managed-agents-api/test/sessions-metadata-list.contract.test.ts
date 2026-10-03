@@ -30,5 +30,10 @@ describe("Managed Agents API — session list metadata query params removed", ()
     expect(paired.status).toBe(400);
     expect(keyOnly.status).toBe(400);
     expect(valueOnly.status).toBe(400);
+    await expect(paired.json()).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining("metadata_key and metadata_value"),
+      },
+    });
   });
 });
