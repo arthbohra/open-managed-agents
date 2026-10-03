@@ -3913,8 +3913,14 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      effect:
+        specifier: 3.22.1
+        version: 3.22.1
     devDependencies:
       '@testcontainers/mysql':
+        specifier: ^12.1.0
+        version: 12.1.0
+      '@testcontainers/postgresql':
         specifier: ^12.1.0
         version: 12.1.0
       '@types/node':

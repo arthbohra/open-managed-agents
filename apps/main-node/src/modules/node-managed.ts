@@ -282,6 +282,11 @@ export async function createManagedNodeRuntime(
   }
   const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql, {
     serializeSessionClaims: config.workspace.strategy === "checkpoint_restore",
+    sweepIntervalMs: 5_000,
+    onError: (error, op) => logger.error(
+      { err: error, op },
+      "session execution sweep failed",
+    ),
   });
 
   async function isManagedSessionExecutionFenceActive(fence: {
