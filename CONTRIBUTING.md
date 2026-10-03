@@ -197,10 +197,11 @@ Workflow `CI`（`.github/workflows/ci.yml`，PR 与 `main`，job `verify`，`run
 
 `@openma/cli` 与 `@openma/sdk` 用 changesets，细节在 [`docs/release-process.md`](docs/release-process.md)：
 
-1. 这两个包有用户可见变更时，在功能 PR 里运行 `pnpm changeset`，把 `.changeset/*.md` 一并提交。内部包 `@open-managed-agents/*` 不发 npm，不要给它们加 changeset。
-2. 合并后 `release.yml` 的 `version-pr` 打开或更新标题为 `chore: version packages` 的 PR。
-3. 核对版本和 changelog 后再合并。`publish` 挂在 GitHub Environment `production` 上，批准后用 npm OIDC 发布。稳定版 tag 形如 `@openma/cli@0.6.0`。beta：`pnpm changeset pre enter beta`，版本带 `-beta.N`，npm dist-tag 为 `beta`。
-4. 也有过人工发版 PR：`chore: release stable CLI 0.6.0 and SDK 1.0.0`（#209），在 beta.2 之后执行 `changeset pre exit`。
+1. 这两个包有用户可见变更时，在功能 PR 里运行 `pnpm changeset`，把 `.changeset/*.md` 一并提交。内部包 `@open-managed-agents/*` 不发 npm，不要给它们加 changeset。会进 npm 包的路径是 `src/`、`README.md` 和运行时依赖。只改测试或 devDependency 不用 changeset。拿不准时用 `pnpm changeset --empty`。
+2. CI 的 `release-check` 与 `verify` 并行，不装依赖。漏了 changeset 会失败。changeset 或版本号是 minor / major 时，PR 要有 `release:minor` / `release:major`，否则失败；patch 不需要 label。Version Packages PR 的 CHANGELOG 还要盖住该包上一个 `@openma/<name>@*` tag 以来、改了上述路径的每个已合并 PR。
+3. 合并后 `release.yml` 的 `version-pr` 打开或更新标题为 `chore: version packages` 的 PR。
+4. 核对版本和 changelog 后再合并。`publish` 在 `pnpm release` 之前跑 `node scripts/release-check.mjs --publish`，不改变 bump 和发布方式。它挂在 GitHub Environment `production` 上，批准后用 npm OIDC 发布。稳定版 tag 形如 `@openma/cli@0.6.0`。beta：`pnpm changeset pre enter beta`，版本带 `-beta.N`，npm dist-tag 为 `beta`。
+5. 也有过人工发版 PR：`chore: release stable CLI 0.6.0 and SDK 1.0.0`（#209），在 beta.2 之后执行 `changeset pre exit`。
 
 用户文档在 `apps/docs`。站点上的 Contributing 页仍是旧的 What / Why / Test plan 提纲；GitHub 上以本文件和 PR 模板为准。
 

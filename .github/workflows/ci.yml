@@ -69,3 +69,32 @@ jobs:
 
       - name: MySQL integration tests
         run: pnpm test:integration:mysql
+
+  # Separate from verify so it does not wait on the 20+ minute suite and does
+  # not use the Litebox /dev/kvm action. Checkout plus a Node script only.
+  release-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch the base branch and tags
+        run: git fetch origin "${{ github.base_ref }}" --tags --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Test the release check
+        run: node --test scripts/release-check.test.mjs scripts/release-check.history.test.mjs
+
+      - name: Check changesets and unreleased pull requests
+        env:
+          RELEASE_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: node scripts/release-check.mjs
