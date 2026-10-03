@@ -25,7 +25,13 @@ import { createNodeOpenAIAgentsRuntime } from "../openai-managed-runtime.js";
 
 import { requestMetrics, tracerMiddleware } from "@open-managed-agents/observability";
 
-import { toFileRecord } from "@open-managed-agents/files-store";
+import {
+  toFileRecord,
+  decodeOutputId,
+  isSafeOutputFilename,
+  unifiedPageErrorMessage,
+  unifiedPageHttpBody,
+} from "@open-managed-agents/files-store";
 
 import { listAuthProviders } from "@open-managed-agents/shared";
 
@@ -45,6 +51,7 @@ import { OmaVaultResolver } from "@open-managed-agents/oma-cap-adapter";
 import { NodeSessionRouter } from "../lib/node-session-router.js";
 import { configureFeishuAgentTools, sqlSessionMetadataReader } from "../lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "../lib/node-outputs-adapter.js";
+import { createFsSessionOutputSource } from "../lib/fs-session-output-source.js";
 
 import { createAuthMiddleware as buildAuthMw, type ApiKeyResolution } from "@open-managed-agents/auth";
 import { ensureTenantSqlite } from "@open-managed-agents/auth-config";
@@ -714,6 +721,24 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
     let requested = limitParam ? parseInt(limitParam, 10) : 100;
     if (isNaN(requested) || requested < 1) requested = 100;
     if (requested > 1000) requested = 1000;
+    if (scopeId) {
+      const page = await filesService.listUnifiedPage({
+        tenantId: t,
+        scopeId,
+        limit: requested,
+        order: c.req.query("order") === "asc" ? "asc" : "desc",
+        cursor: c.req.query("cursor"),
+        beforeId: c.req.query("before_id"),
+        afterId: c.req.query("after_id"),
+        outputs: createFsSessionOutputSource(outputsRoot),
+      });
+      if (!page.ok) return c.json({ error: unifiedPageErrorMessage(page.error) }, 400);
+      return c.json(unifiedPageHttpBody(page));
+    }
+    // Unscoped lists stay on the pre-existing Node contract: one page,
+    // `has_more: false`, and `before_id` / `after_id` / `order` / `cursor`
+    // are ignored. Cloudflare's unscoped route still honors those params;
+    // do not "align" this branch without a client that pages it.
     const rows = await filesService.list({
       tenantId: t,
       sessionId: scopeId,
@@ -724,6 +749,17 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
   v1.get("/oma/files/:id/content", async (c) => {
     const id = c.req.param("id");
     const t = c.var.tenant_id;
+    const decoded = decodeOutputId(id);
+    if (decoded) {
+      if (!isSafeOutputFilename(decoded.filename)) {
+        return c.json({ error: "File not found" }, 404);
+      }
+      const obj = await sessionOutputs.read(t, decoded.sessionId, decoded.filename);
+      if (!obj) return c.json({ error: "File content not found" }, 404);
+      return new Response(obj.body, {
+        headers: { "Content-Type": obj.contentType },
+      });
+    }
     const row = await filesService.get({ tenantId: t, fileId: id });
     if (!row) return c.json({ error: "File not found" }, 404);
     if (!row.downloadable) return c.json({ error: "This file is not downloadable" }, 403);
@@ -736,6 +772,26 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
   v1.get("/oma/files/:id", async (c) => {
     const id = c.req.param("id");
     const t = c.var.tenant_id;
+    const decoded = decodeOutputId(id);
+    if (decoded) {
+      if (!isSafeOutputFilename(decoded.filename)) {
+        return c.json({ error: "File not found" }, 404);
+      }
+      const listed = await sessionOutputs.list(t, decoded.sessionId);
+      const hit = listed?.find((entry) => entry.filename === decoded.filename);
+      if (!hit) return c.json({ error: "File not found" }, 404);
+      return c.json({
+        id,
+        type: "file",
+        filename: hit.filename,
+        media_type: hit.media_type,
+        size_bytes: hit.size_bytes,
+        created_at: hit.uploaded_at,
+        scope_id: decoded.sessionId,
+        scope: { type: "session", id: decoded.sessionId },
+        downloadable: true,
+      });
+    }
     const row = await filesService.get({ tenantId: t, fileId: id });
     if (!row) return c.json({ error: "File not found" }, 404);
     return c.json(toFileRecord(row));
