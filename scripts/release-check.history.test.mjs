@@ -1,13 +1,34 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { auditRepository } from "./release-check.mjs";
+import { auditRepository, loadPublishedPackages } from "./release-check.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const script = path.join(repoRoot, "scripts/release-check.mjs");
+
+/** CHANGELOG versions with no git tag yet, excluding the pending publish version in package.json. */
+function untaggedExcludingPendingPublish(cwd, untagged, packageVersionOverrides = null) {
+  const pending = new Set(
+    loadPublishedPackages(cwd).map((pkg) => {
+      const manifest = JSON.parse(readFileSync(path.join(cwd, pkg.dir, "package.json"), "utf8"));
+      const version = packageVersionOverrides?.[pkg.name] ?? manifest.version;
+      return `${pkg.name}@${version}`;
+    }),
+  );
+  return untagged.filter((entry) => !pending.has(`${entry.package}@${entry.version}`));
+}
+
+const historicalUntaggedVersions = [
+  "@openma/cli@0.3.2",
+  "@openma/cli@0.5.1",
+  "@openma/cli@0.6.0-beta.0",
+  "@openma/sdk@0.1.0",
+  "@openma/sdk@1.0.0-beta.0",
+];
 
 const cleanTags = [
   "@openma/cli@0.4.0",
@@ -52,13 +73,23 @@ test("historical tags: complete releases pass and @openma/cli@0.6.0-beta.1 is mi
   assert.equal(beta1.missing.some((commit) => commit.subject.includes("(#173)")), false);
   assert.equal(beta1.missing.some((commit) => commit.subject.includes("(#183)")), true);
 
-  assert.deepEqual(report.untagged.map((entry) => `${entry.package}@${entry.version}`).sort(), [
-    "@openma/cli@0.3.2",
-    "@openma/cli@0.5.1",
-    "@openma/cli@0.6.0-beta.0",
-    "@openma/sdk@0.1.0",
-    "@openma/sdk@1.0.0-beta.0",
-  ]);
+  assert.deepEqual(
+    untaggedExcludingPendingPublish(repoRoot, report.untagged)
+      .map((entry) => `${entry.package}@${entry.version}`)
+      .sort(),
+    historicalUntaggedVersions,
+  );
+});
+
+test("version PR adds one untagged new version: pending package.json version is ignored", () => {
+  const report = auditRepository(repoRoot);
+  const versionPrUntagged = [...report.untagged, { package: "@openma/cli", version: "0.6.2" }];
+  assert.deepEqual(
+    untaggedExcludingPendingPublish(repoRoot, versionPrUntagged, { "@openma/cli": "0.6.2" })
+      .map((entry) => `${entry.package}@${entry.version}`)
+      .sort(),
+    historicalUntaggedVersions,
+  );
 });
 
 test("--audit reports those findings and exits 0", () => {
