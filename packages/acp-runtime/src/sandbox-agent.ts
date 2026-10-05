@@ -113,9 +113,18 @@ export interface ManagedMcpProxyCapability {
   sessionsToken: string;
 }
 
+export type ManagedHostedInferenceCapability = ManagedMcpProxyCapability;
+
 /** Decode only the official self-hosted Work secret fields needed by an ACP
  * child. Invalid or absent input is a capability miss, never a reason to fall
  * back to the original upstream MCP URL. */
+export function managedHostedInferenceFromWorkEnvironment(input: {
+  ANTHROPIC_BASE_URL?: string;
+  ANTHROPIC_WORK_SECRET?: string;
+}): ManagedHostedInferenceCapability | null {
+  return managedMcpProxyFromWorkEnvironment(input);
+}
+
 export function managedMcpProxyFromWorkEnvironment(input: {
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_WORK_SECRET?: string;
@@ -162,6 +171,58 @@ export function managedMcpProxyFromWorkEnvironment(input: {
  * an upstream credential.  It remains in an Authorization header so it cannot
  * leak through URL logs, history, redirects, or checkpoint filenames.
  */
+export function projectAcpSandboxHostedInferenceEnv(input: {
+  sessionId: string;
+  gatewayBaseUrl?: string;
+  sessionsToken?: string;
+  env: Record<string, string | undefined>;
+  enableProxy?: boolean;
+}): Record<string, string | undefined> {
+  if (
+    input.enableProxy === false
+    || input.sessionId.length === 0
+    || !input.sessionsToken
+    || !input.gatewayBaseUrl
+  ) {
+    return { ...input.env };
+  }
+  const capability = {
+    gatewayBaseUrl: input.gatewayBaseUrl,
+    sessionsToken: input.sessionsToken,
+  };
+  const gateway = new URL(capability.gatewayBaseUrl);
+  if (gateway.protocol !== "http:" && gateway.protocol !== "https:") {
+    throw new Error("ACP sandbox inference proxy gateway must use HTTP or HTTPS");
+  }
+  const hostedUrl = new URL(gateway.origin);
+  hostedUrl.pathname = [
+    "v1",
+    "oma",
+    "inference-proxy",
+    encodeURIComponent(input.sessionId),
+  ].join("/");
+  const next = { ...input.env };
+  for (const key of [
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_BASE_URL",
+  ]) {
+    delete next[key];
+  }
+  return {
+    ...next,
+    HOSTED_INFERENCE_URL: hostedUrl.toString().replace(/\/$/, ""),
+    HOSTED_INFERENCE_TOKEN: capability.sessionsToken,
+  };
+}
+
 export function projectAcpSandboxMcpServers(input: {
   sessionId: string;
   gatewayBaseUrl?: string;

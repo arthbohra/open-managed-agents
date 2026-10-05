@@ -27,6 +27,7 @@
     "@open-managed-agents/evals-store": "workspace:*",
     "@open-managed-agents/files-store": "workspace:*",
     "@open-managed-agents/http-routes": "workspace:*",
+    "@open-managed-agents/inference-proxy": "workspace:*",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/kv-store": "workspace:*",

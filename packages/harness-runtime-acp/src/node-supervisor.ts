@@ -10,6 +10,7 @@ import { resolveKnownAgent } from "@open-managed-agents/acp-runtime/registry";
 import { NodeSpawner } from "@open-managed-agents/acp-runtime/node-spawner";
 import {
   managedMcpProxyFromWorkEnvironment,
+  projectAcpSandboxHostedInferenceEnv,
   projectAcpSandboxMcpServers,
 } from "@open-managed-agents/acp-runtime/sandbox-agent";
 import type { AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
@@ -212,13 +213,18 @@ export function createNodeManagedAcpSupervisorApp(
           ...resolved,
           id: resolved.id ?? options.agentId ?? harness.id,
           cwd: resolved.cwd ?? "/workspace",
-          env: {
-            ...(resolved.env ?? {}),
-            ...scrubbedEnvironment,
-            ...(active.outputPath === null
-              ? { OUTPUT_PATH: undefined }
-              : { OUTPUT_PATH: active.outputPath }),
-          },
+          env: projectAcpSandboxHostedInferenceEnv({
+            sessionId: session.id,
+            gatewayBaseUrl: active.proxy.gatewayBaseUrl,
+            sessionsToken: active.proxy.sessionsToken,
+            env: {
+              ...(resolved.env ?? {}),
+              ...scrubbedEnvironment,
+              ...(active.outputPath === null
+                ? { OUTPUT_PATH: undefined }
+                : { OUTPUT_PATH: active.outputPath }),
+            },
+          }),
         };
         return {
           agent,

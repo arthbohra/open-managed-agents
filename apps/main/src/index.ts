@@ -183,6 +183,7 @@ import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
 import statsRoutes from "./routes/stats";
+import inferenceProxyRoutes from "./routes/inference-proxy";
 import mcpProxyRoutes, {
   createManagedMcpProxyCredentialSource,
   resolveProxyTargetByTenant,
@@ -1422,6 +1423,7 @@ app.all("/billing-api/*", async (c) => {
 // current Work-scoped sessions_token. authMiddleware resolves both; the route
 // then validates that the requested server belongs to the same Session.
 app.route("/v1/oma/mcp-proxy", mcpProxyRoutes);
+app.route("/v1/oma/inference-proxy", inferenceProxyRoutes);
 
 // /v1/oma/* aliases — OMA-only namespaces re-mounted under an `oma/` prefix
 // so the public surface can grow into a clean two-tier API:

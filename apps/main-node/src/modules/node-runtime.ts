@@ -64,6 +64,7 @@ export async function createNodeRuntime(
   const managed = await createManagedNodeRuntime(foundation, components, disposables);
   const {
     resolveNodeMcpProxyTarget,
+    resolveNodeInferenceUpstream,
     managedRuntimeRunner,
     managedRuntimeReaders,
     managedSessionExecutionWorker,
@@ -274,6 +275,7 @@ export async function createNodeRuntime(
     realtimeDescription,
     sessionRegistry,
     resolveNodeMcpProxyTarget,
+    resolveNodeInferenceUpstream,
     managedRuntimeRunner,
     managedRuntimeReaders,
     managedSessionExecutionWorker,

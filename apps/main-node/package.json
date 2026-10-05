@@ -101,6 +101,7 @@
     "@open-managed-agents/runtime-resource-contract": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vault-forward": "workspace:*",
+    "@open-managed-agents/inference-proxy": "workspace:*",
     "@open-managed-agents/vault-store-sql": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
     "@aws-sdk/client-s3": "^3.1096.0",
