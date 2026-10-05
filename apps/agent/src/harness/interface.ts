@@ -291,6 +291,11 @@ export interface HarnessContext {
       gatewayBaseUrl: string;
       sessionsToken: string;
     };
+    /** Same Work capability as mcpProxy; used to project hosted inference env. */
+    hostedInference?: {
+      gatewayBaseUrl: string;
+      sessionsToken: string;
+    };
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;

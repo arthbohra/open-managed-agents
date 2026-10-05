@@ -60,6 +60,7 @@ import { relative } from "node:path";
 
 import { buildNodeSkillsRoutes } from "../lib/node-skills-routes.js";
 
+import { buildNodeHttpInferenceProxyRoutes } from "../lib/http-inference-proxy.js";
 import { buildNodeHttpMcpProxyRoutes } from "../lib/http-mcp-proxy.js";
 
 import { Disposables } from "../lifecycle.js";
@@ -102,6 +103,7 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
     realtimeDescription,
     sessionRegistry,
     resolveNodeMcpProxyTarget,
+    resolveNodeInferenceUpstream,
     managedRuntimeRunner,
     managedRuntimeReaders,
     managedSessionRuntimeStream,
@@ -393,6 +395,9 @@ export async function mountNodeHttp(runtime: NodeRuntime, disposables: Disposabl
   }));
   v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
     resolveTarget: resolveNodeMcpProxyTarget,
+  }));
+  v1.route("/oma/inference-proxy", buildNodeHttpInferenceProxyRoutes({
+    resolveUpstream: resolveNodeInferenceUpstream,
   }));
   v1.route("/vaults", managedVaultsRoutes);
   v1.route("/vaults", managedCredentialsRoutes);

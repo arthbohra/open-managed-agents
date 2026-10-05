@@ -21,6 +21,7 @@ import {
   managedMcpProxyFromWorkEnvironment,
   materializeAcpSandboxAgentState,
   prepareAcpSandboxAgent,
+  projectAcpSandboxHostedInferenceEnv,
   projectAcpSandboxMcpServers,
   releaseAcpSandboxAgentState,
   restoreAcpSandboxAgentState,
@@ -143,6 +144,14 @@ export class AcpSandboxHarness implements HarnessInterface {
         });
         const managedMcpProxy = ctx.env.mcpProxy
           ?? managedMcpProxyFromWorkEnvironment(ctx.env);
+        const launchEnv = projectAcpSandboxHostedInferenceEnv({
+          sessionId: ctx.session_id,
+          ...(managedMcpProxy === null ? {} : {
+            gatewayBaseUrl: managedMcpProxy.gatewayBaseUrl,
+            sessionsToken: managedMcpProxy.sessionsToken,
+          }),
+          env: preparation.launch.env,
+        });
         const mcpServers = projectAcpSandboxMcpServers({
           sessionId: ctx.session_id,
           ...(managedMcpProxy === null ? {} : {
@@ -152,7 +161,10 @@ export class AcpSandboxHarness implements HarnessInterface {
           servers: ctx.agent.mcp_servers ?? [],
         });
         this.#session = await acpRuntime.start({
-          agent: preparation.launch,
+          agent: {
+            ...preparation.launch,
+            env: launchEnv,
+          },
           restart: config.restart
             ? {
                 mode: config.restart.mode,

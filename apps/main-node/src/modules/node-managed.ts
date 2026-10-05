@@ -262,6 +262,40 @@ export async function createManagedNodeRuntime(
     return null;
   }
 
+  async function resolveNodeInferenceUpstream(input: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<{
+    wireModel: string;
+    apiKey: string;
+    baseURL?: string;
+    provider?: string;
+    customHeaders?: Record<string, string>;
+  } | null> {
+    const managedContext = await managedRuntimeReaders.executionContext.find({
+      workspaceId: input.tenantId,
+      sessionId: input.sessionId,
+    });
+    const agentModel = managedContext?.session.agent.model
+      ?? (await sessionsService.get({
+        tenantId: input.tenantId,
+        sessionId: input.sessionId,
+      }).catch(() => null))?.agent_snapshot?.model;
+    if (!agentModel) return null;
+    try {
+      const creds = await resolveNodeModelCreds(input.tenantId, agentModel);
+      return {
+        wireModel: creds.wireModel,
+        apiKey: creds.apiKey,
+        baseURL: creds.baseURL,
+        provider: creds.provider,
+        customHeaders: creds.customHeaders,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   const nodeMcpProxyBinding = createNodeMcpProxyBinding({
     resolveTarget: resolveNodeMcpProxyTarget,
   });
@@ -1133,6 +1167,7 @@ export async function createManagedNodeRuntime(
 
   return {
     resolveNodeMcpProxyTarget,
+    resolveNodeInferenceUpstream,
     managedRuntimeRunner,
     managedRuntimeReaders,
     managedSessionExecutionWorker,
