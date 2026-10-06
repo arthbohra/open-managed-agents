@@ -70,6 +70,9 @@ jobs:
       - name: MySQL integration tests
         run: pnpm test:integration:mysql
 
+      - name: PostgreSQL MCP access-loss integration
+        run: pnpm --filter @open-managed-agents/main-node test:integration:postgres
+
   # Separate from verify so it does not wait on the 20+ minute suite and does
   # not use the Litebox /dev/kvm action. Checkout plus a Node script only.
   release-check:
