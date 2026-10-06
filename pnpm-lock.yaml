@@ -1206,6 +1206,9 @@ importers:
 
   packages/auth:
     dependencies:
+      '@open-managed-agents/inference-proxy':
+        specifier: workspace:*
+        version: link:../inference-proxy
       hono:
         specifier: ^4.7.0
         version: 4.12.12
