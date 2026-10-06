@@ -214,6 +214,14 @@ export interface HarnessContext {
    */
   tenant_id?: string;
 
+  /**
+   * When the agent uses `runtime_binding` (AcpProxyHarness), the host
+   * filesystem path for an attached `github_repository` resource. Forwarded
+   * on `session.start.cwd` so the ACP child runs in the project tree while
+   * the daemon keeps the OMA bundle in its scratch directory.
+   */
+  acpSessionStartCwd?: string;
+
   /** Platform-prepared tools: built from agent config, ready to pass to generateText. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools: Record<string, any>;

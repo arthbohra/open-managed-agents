@@ -77,6 +77,7 @@ import {
 } from "@open-managed-agents/sandbox";
 import { HarnessLease, resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
+import { resolveRepositoryLocalPath } from "../harness/acp-proxy-delivery";
 import {
   createPiModelRuntime,
   toAiSdkLanguageModel,
@@ -4895,13 +4896,16 @@ export class SessionDO extends DurableObject<Env> {
       access: "read_write" | "read_only";
       instructions?: string;
     }> = [];
+    let sessionResourceRows: Awaited<
+      ReturnType<Awaited<ReturnType<typeof getCfServicesForTenant>>["sessions"]["listResourcesBySession"]>
+    > = [];
     if (sessionId) {
       // listResourcesBySession queries the session_id column directly — no
       // tenant-prefix mismatch, no JSON.parse loop. Replaces the prior
       // CONFIG_KV.list scan that tripped over staging KV namespaces.
       const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-      const rows = await services.sessions.listResourcesBySession({ sessionId });
-      for (const row of rows) {
+      sessionResourceRows = await services.sessions.listResourcesBySession({ sessionId });
+      for (const row of sessionResourceRows) {
         if (row.type === "memory_store" && row.resource.type === "memory_store" && row.resource.memory_store_id) {
           memoryAttachments.push({
             store_id: row.resource.memory_store_id,
@@ -5174,12 +5178,22 @@ export class SessionDO extends DurableObject<Env> {
     // prefix (turn N + 1 reuses the same prompt as turn N).
     const systemPrompt = composeSystemPrompt(rawSystemPrompt, platformReminders);
 
+    const acpSessionStartCwd = agent.runtime_binding
+      ? resolveRepositoryLocalPath(
+          sessionResourceRows.map((row) => ({
+            type: row.type,
+            resource: row.resource as unknown as Record<string, unknown>,
+          })),
+        )
+      : undefined;
+
     // --- Harness receives a fully-prepared context ---
     const ctx: HarnessContext = {
       agent,
       userMessage,
       session_id: this.state.session_id,
       tenant_id: this.state.tenant_id,
+      ...(acpSessionStartCwd ? { acpSessionStartCwd } : {}),
       tools: allTools,
       model,
       pi: piRuntime,
