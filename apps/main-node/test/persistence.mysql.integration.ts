@@ -225,6 +225,18 @@ describe.sequential("real MySQL + MinIO, independent process and sandbox storage
       throw new Error(`${owner} failed to start: ${logs.join("").slice(-4000)}`);
     };
     const sql = await createMysql2SqlClient(base.databaseUrl);
+    const sharedOutputProbe = new NodeSharedSessionOutputs({
+      sql,
+      blobs: new S3BlobStore({
+        endpoint: base.endpoint,
+        bucket: base.bucket,
+        accessKeyId: base.accessKey,
+        secretAccessKey: base.secretKey,
+        region: "us-east-1",
+        forcePathStyle: true,
+        prefix: base.prefix,
+      }),
+    });
     const beta = { "anthropic-beta": "managed-agents-2026-04-01" };
     const wait = async (predicate: () => Promise<boolean>, label: string) => {
       for (let i = 0; i < 480; i++) {
@@ -250,8 +262,10 @@ describe.sequential("real MySQL + MinIO, independent process and sandbox storage
       const pointer = async () => sql.prepare("SELECT candidate_id FROM managed_session_workspace_checkpoints WHERE workspace_id = ? AND session_id = ?")
         .bind("default", session.id).first<{ candidate_id: string }>();
       await wait(async () => !!(await pointer())?.candidate_id, "first checkpoint");
-      await wait(async () => !!(await sql.prepare("SELECT candidate_id FROM managed_session_output_snapshots WHERE workspace_id = ? AND session_id = ?")
-        .bind("default", session.id).first()), "first output publication");
+      await wait(async () => {
+        const listing = await sharedOutputProbe.list("default", session.id);
+        return listing.some((file) => file.filename === "result.txt");
+      }, "first output publication");
       const oldOutput = await sql.prepare("SELECT candidate_id FROM managed_session_output_snapshots WHERE workspace_id = ? AND session_id = ?")
         .bind("default", session.id).first<{ candidate_id: string }>();
       const first = (await pointer())!.candidate_id;
@@ -272,6 +286,10 @@ describe.sequential("real MySQL + MinIO, independent process and sandbox storage
         memory_store_id: store.id, content: "MEMORY_FROM_B", view: "full",
         precondition: { type: "content_sha256", content_sha256: acrossOwners.content_sha256 },
       })).toMatchObject({ content: "MEMORY_FROM_B" });
+      await wait(async () => {
+        const response = await fetch(`${b.url}/v1/sessions/${session.id}/outputs/result.txt`, { headers: beta });
+        return response.status === 200;
+      }, "cross-owner session output read");
       const outputs = await fetch(`${b.url}/v1/sessions/${session.id}/outputs/result.txt`, { headers: beta });
       expect(outputs.status, await outputs.clone().text()).toBe(200);
       expect(await outputs.text()).toBe("OUTPUT_FROM_A");

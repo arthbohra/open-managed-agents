@@ -329,6 +329,24 @@ const STATE_ROW_ID = "cf_state_row_id";
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
 const HUNG_SCHEDULE_TIMEOUT_SECONDS = 30;
 
+/** Next cron fire strictly after `nowMs`. `getNextDate` can return the current
+ * tick on a boundary; a due row makes `_scheduleNextAlarm` re-arm at now+1ms
+ * and the handler can invoke the callback again immediately. */
+function nextCronFireSeconds(cron: string, nowMs = Date.now()): number {
+  const expr = parseCronExpression(cron);
+  let anchor = new Date(nowMs);
+  let nextSec = Math.floor(expr.getNextDate(anchor).getTime() / 1000);
+  const nowSec = Math.floor(nowMs / 1000);
+  for (let guard = 0; nextSec <= nowSec && guard < 512; guard++) {
+    anchor = new Date((nextSec + 1) * 1000);
+    nextSec = Math.floor(expr.getNextDate(anchor).getTime() / 1000);
+  }
+  if (nextSec <= nowSec) {
+    throw new Error(`Could not compute a future cron fire time for ${cron}`);
+  }
+  return nextSec;
+}
+
 export class SessionDO extends DurableObject<Env> {
   // ── cf-agents-replacement state (see _ensureCfAgentsSchema below) ─────
   private _state: SessionState | undefined;
@@ -6069,8 +6087,7 @@ export class SessionDO extends DurableObject<Env> {
     } else if (typeof when === "string") {
       type = "cron";
       cron = when;
-      const next = parseCronExpression(when).getNextDate(new Date());
-      timestamp = Math.floor(next.getTime() / 1000);
+      timestamp = nextCronFireSeconds(when);
       this.ctx.storage.sql.exec(
         `INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time) VALUES (?, ?, ?, 'cron', ?, ?)`,
         id, callbackName, payloadJson, when, timestamp,
@@ -6329,8 +6346,7 @@ export class SessionDO extends DurableObject<Env> {
       // Reschedule cron / interval, delete one-shots
       if (row.type === "cron" && row.cron) {
         try {
-          const nextTime = parseCronExpression(row.cron).getNextDate(new Date());
-          const nextSec = Math.floor(nextTime.getTime() / 1000);
+          const nextSec = nextCronFireSeconds(row.cron);
           this.ctx.storage.sql.exec(`UPDATE cf_agents_schedules SET time = ? WHERE id = ?`, nextSec, row.id);
         } catch (err) {
           console.error(`[schedule] cron parse failed during reschedule for ${row.id}:`, err);
