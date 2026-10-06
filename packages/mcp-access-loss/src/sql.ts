@@ -59,7 +59,11 @@ export function ensureAccessLossSchema(sql: SqlClient): Promise<void> {
   const pending = sql.exec(EFFECT_TABLE)
     .then(() => sql.exec(REAUTH_TABLE))
     .then(() => sql.exec(WAKEUP_TABLE))
-    .then(() => Promise.all(ACCESS_LOSS_INDEXES.map((ddl) => sql.exec(ddl))))
+    .then(async () => {
+      for (const ddl of ACCESS_LOSS_INDEXES) {
+        await sql.exec(ddl);
+      }
+    })
     .catch((error: unknown) => {
       schemaReady?.delete(sql);
       throw error;

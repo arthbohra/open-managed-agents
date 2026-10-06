@@ -149,6 +149,7 @@ async function seedExplainFixtures(
 }
 
 async function explainPostgres(raw: postgres.Sql<{}>, query: string, params: unknown[]) {
+  await raw.unsafe("SET LOCAL enable_seqscan = off");
   const [plan] = await raw.unsafe(`EXPLAIN (FORMAT JSON) ${query}`, params as never[]) as Array<[{ Plan: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] } }]>;
   const root = plan.Plan;
   const usesIndex = planUsesIndex(root);

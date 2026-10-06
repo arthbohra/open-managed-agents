@@ -1012,6 +1012,9 @@ importers:
       '@testcontainers/mysql':
         specifier: ^12.1.0
         version: 12.1.0
+      '@testcontainers/postgresql':
+        specifier: ^12.1.0
+        version: 12.1.0
       '@types/better-sqlite3':
         specifier: ^9.6.0
         version: 9.6.0
@@ -2846,7 +2849,7 @@ importers:
     devDependencies:
       vitest:
         specifier: ^4.1.3
-        version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.5.1)(@vitest/coverage-v8@4.1.4)(jiti@2.6.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)(msw@2.14.6(@types/node@26.5.1)(typescript@7.0.2))(tsx@4.21.0)(yaml@2.9.1)
+        version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.6.3)(@vitest/coverage-v8@4.1.4)(jiti@2.6.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)(msw@2.14.6(@types/node@26.6.3)(typescript@7.0.2))(tsx@4.21.0)(yaml@2.9.1)
 
   packages/memory-document-store:
     dependencies:
