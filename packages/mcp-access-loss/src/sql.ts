@@ -44,9 +44,9 @@ const WAKEUP_TABLE = `CREATE TABLE IF NOT EXISTS session_wakeups (
 )`;
 
 const ACCESS_LOSS_INDEXES = [
-  `CREATE INDEX IF NOT EXISTS mcp_access_loss_effects_session_idx
+  `CREATE INDEX mcp_access_loss_effects_session_idx
      ON mcp_access_loss_effects (workspace_id, session_id)`,
-  `CREATE INDEX IF NOT EXISTS session_wakeups_workspace_session_status_idx
+  `CREATE INDEX session_wakeups_workspace_session_status_idx
      ON session_wakeups (workspace_id, session_id, status)`,
 ];
 
@@ -61,7 +61,7 @@ export function ensureAccessLossSchema(sql: SqlClient): Promise<void> {
     .then(() => sql.exec(WAKEUP_TABLE))
     .then(async () => {
       for (const ddl of ACCESS_LOSS_INDEXES) {
-        await sql.exec(ddl);
+        await createIndexIfMissing(sql, ddl);
       }
     })
     .catch((error: unknown) => {
@@ -249,6 +249,19 @@ export async function readSessionMetadata(
     if (isMissingRelation(error)) return null;
     throw error;
   }
+}
+
+async function createIndexIfMissing(sql: SqlClient, ddl: string): Promise<void> {
+  try {
+    await sql.exec(ddl);
+  } catch (error) {
+    if (!isDuplicateIndex(error)) throw error;
+  }
+}
+
+function isDuplicateIndex(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate key name|already exists|duplicate index/i.test(message);
 }
 
 function isUniqueConstraint(error: unknown): boolean {

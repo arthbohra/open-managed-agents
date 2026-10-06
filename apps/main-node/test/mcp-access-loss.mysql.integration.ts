@@ -210,9 +210,9 @@ async function installIntegrationSchema(sql: SqlClient) {
       pending_scan_until BIGINT NULL,
       PRIMARY KEY (publication_id, scope_key)
     )`);
-  await sql.exec(`
-    CREATE INDEX IF NOT EXISTS idx_slack_thread_sessions_tenant_session
-      ON slack_thread_sessions (tenant_id, session_id)`);
+  await createIndexIfMissing(sql,
+    `CREATE INDEX idx_slack_thread_sessions_tenant_session
+       ON slack_thread_sessions (tenant_id, session_id)`);
   await sql.exec(`
     CREATE TABLE IF NOT EXISTS managed_session_executions (
       workspace_id VARCHAR(128) NOT NULL,
@@ -229,12 +229,21 @@ async function installIntegrationSchema(sql: SqlClient) {
       interrupt_requested_at_ms BIGINT NULL,
       PRIMARY KEY (workspace_id, id)
     )`);
-  await sql.exec(`
-    CREATE INDEX IF NOT EXISTS managed_session_executions_session_idx
-      ON managed_session_executions (workspace_id, session_id, generation)`);
-  await sql.exec(`
-    CREATE INDEX IF NOT EXISTS managed_session_executions_running_idx
-      ON managed_session_executions (workspace_id, session_id, state, generation)`);
+  await createIndexIfMissing(sql,
+    `CREATE INDEX managed_session_executions_session_idx
+       ON managed_session_executions (workspace_id, session_id, generation)`);
+  await createIndexIfMissing(sql,
+    `CREATE INDEX managed_session_executions_running_idx
+       ON managed_session_executions (workspace_id, session_id, state, generation)`);
+}
+
+async function createIndexIfMissing(sql: SqlClient, ddl: string): Promise<void> {
+  try {
+    await sql.exec(ddl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate key name|already exists|duplicate index/i.test(message)) throw error;
+  }
 }
 
 async function seedExplainFixtures(
