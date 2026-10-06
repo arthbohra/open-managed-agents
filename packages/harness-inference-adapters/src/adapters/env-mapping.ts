@@ -2,7 +2,7 @@ import type {
   InferenceConfigAdapter,
   InferenceConfigPlan,
   InferenceConfigPlanContext,
-} from "@open-managed-agents/acp-runtime/inference";
+} from "@open-managed-agents/acp-runtime/inference-config";
 import type { AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 
 export interface EnvMappingInferenceRule {

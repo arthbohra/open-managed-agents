@@ -27,7 +27,7 @@ import {
   restoreAcpSandboxAgentState,
   type AcpSandboxAgentPreparation,
 } from "@open-managed-agents/acp-runtime/sandbox-agent";
-import { InferenceEndpointsMissingError } from "@open-managed-agents/acp-runtime/inference";
+import { InferenceEndpointsMissingError } from "@open-managed-agents/acp-runtime/inference-config";
 import { wireHostedInferenceForAcpLaunch } from "@open-managed-agents/harness-inference-adapters";
 import {
   buildAcpSemanticRecoveryPrompt,

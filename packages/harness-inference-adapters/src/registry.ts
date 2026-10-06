@@ -1,4 +1,4 @@
-import { InferenceConfigAdapterRegistry } from "@open-managed-agents/acp-runtime/inference";
+import { InferenceConfigAdapterRegistry } from "@open-managed-agents/acp-runtime/inference-config";
 
 import { claudeInferenceAdapter } from "./adapters/claude.js";
 import { codexInferenceAdapter } from "./adapters/codex.js";

@@ -12,7 +12,7 @@
     "./known-agents": "./src/known-agents.ts",
     "./native-state": "./src/native-state.ts",
     "./sandbox-agent": "./src/sandbox-agent.ts",
-    "./inference": "./src/inference/index.ts"
+    "./inference-config": "./src/inference/index.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

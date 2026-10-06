@@ -1,5 +1,5 @@
-import { joinHostedInferenceUrl } from "@open-managed-agents/acp-runtime/inference";
-import type { HostedInferenceProxyTarget } from "@open-managed-agents/acp-runtime/inference";
+import { joinHostedInferenceUrl } from "@open-managed-agents/acp-runtime/inference-config";
+import type { HostedInferenceProxyTarget } from "@open-managed-agents/acp-runtime/inference-config";
 
 export function proxyUrl(
   proxy: HostedInferenceProxyTarget,

@@ -17,9 +17,9 @@ import {
   PROXY,
 } from "./helpers.js";
 import { resolveProtocolEndpointsFromModelCard } from "../src/endpoint-catalog.js";
-import { projectHostedInferenceForAcpAgent } from "@open-managed-agents/acp-runtime/inference";
-import { InferenceConfigAdapterRegistry } from "@open-managed-agents/acp-runtime/inference";
-import { InferenceProtocolUnsupportedError } from "@open-managed-agents/acp-runtime/inference";
+import { projectHostedInferenceForAcpAgent } from "@open-managed-agents/acp-runtime/inference-config";
+import { InferenceConfigAdapterRegistry } from "@open-managed-agents/acp-runtime/inference-config";
+import { InferenceProtocolUnsupportedError } from "@open-managed-agents/acp-runtime/inference-config";
 
 describe("golden harness inference adapters", () => {
   it("pi", () => {

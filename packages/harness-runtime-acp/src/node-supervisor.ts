@@ -15,7 +15,7 @@ import {
 import {
   InferenceEndpointsMissingError,
   type InferenceWireProtocol,
-} from "@open-managed-agents/acp-runtime/inference";
+} from "@open-managed-agents/acp-runtime/inference-config";
 import { wireHostedInferenceForAcpLaunch } from "@open-managed-agents/harness-inference-adapters";
 import { bindAcpAgentState, type AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 import {

@@ -1,6 +1,6 @@
-import type { InferenceProtocolEndpoint } from "@open-managed-agents/acp-runtime/inference";
-import type { InferenceConfigAdapter } from "@open-managed-agents/acp-runtime/inference";
-import { selectInferenceProtocol } from "@open-managed-agents/acp-runtime/inference";
+import type { InferenceProtocolEndpoint } from "@open-managed-agents/acp-runtime/inference-config";
+import type { InferenceConfigAdapter } from "@open-managed-agents/acp-runtime/inference-config";
+import { selectInferenceProtocol } from "@open-managed-agents/acp-runtime/inference-config";
 
 export const PROXY = {
   proxyBaseUrl: "https://api.openma.test/v1/oma/inference-proxy/sess_1",

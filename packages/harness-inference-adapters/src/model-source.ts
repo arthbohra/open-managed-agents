@@ -1,7 +1,7 @@
 import {
   InferenceEndpointsMissingError,
   type InferenceTargetDescriptor,
-} from "@open-managed-agents/acp-runtime/inference";
+} from "@open-managed-agents/acp-runtime/inference-config";
 
 import {
   resolveProtocolEndpointsFromModelCard,

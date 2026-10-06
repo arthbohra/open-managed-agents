@@ -1,5 +1,5 @@
-import { projectHostedInferenceForAcpAgent } from "@open-managed-agents/acp-runtime/inference";
-import type { InferenceTargetDescriptor } from "@open-managed-agents/acp-runtime/inference";
+import { projectHostedInferenceForAcpAgent } from "@open-managed-agents/acp-runtime/inference-config";
+import type { InferenceTargetDescriptor } from "@open-managed-agents/acp-runtime/inference-config";
 import type { AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 
 import { buildInferenceTarget, type HostedInferenceModelSource } from "./model-source.js";

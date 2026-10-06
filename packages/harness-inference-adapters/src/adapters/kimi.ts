@@ -1,4 +1,4 @@
-import type { InferenceConfigAdapter } from "@open-managed-agents/acp-runtime/inference";
+import type { InferenceConfigAdapter } from "@open-managed-agents/acp-runtime/inference-config";
 import { join } from "node:path";
 
 import { matchesAgentIdentity } from "../match.js";
