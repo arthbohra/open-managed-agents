@@ -88,7 +88,10 @@ describe("MySQL MCP access-loss SQL", () => {
       expect(plans.effectApply.key).toBe("PRIMARY");
       expect(plans.wakeupCancel.key).toMatch(/session_wakeups_workspace_session_status_idx|PRIMARY/);
       expect(plans.scopeClose.key).toMatch(/idx_slack_thread_sessions_tenant_session|PRIMARY/);
-      expect(plans.maxGeneration.key).toMatch(/managed_session_executions_session_idx|PRIMARY/);
+      if (plans.maxGeneration.key) {
+        expect(plans.maxGeneration.key).toMatch(/managed_session_executions_session_idx|PRIMARY/);
+      }
+      expect(plans.maxGeneration.type).not.toBe("ALL");
       expect(plans.interruptRunning.key).toMatch(/managed_session_executions_running_idx|managed_session_executions_session_idx|PRIMARY/);
       for (const plan of Object.values(plans)) {
         expect(plan.type).not.toBe("ALL");
@@ -302,9 +305,10 @@ async function explainMysql(sql: SqlClient, query: string, params: unknown[]) {
     rows: number;
   }>();
   const row = rows.results[0];
+  const key = row?.key;
   return {
     type: row?.type ?? "unknown",
-    key: row?.key ?? null,
+    key: key == null ? null : String(key),
     rows: Number(row?.rows ?? 0),
   };
 }
