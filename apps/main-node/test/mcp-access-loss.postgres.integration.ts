@@ -151,10 +151,8 @@ async function seedExplainFixtures(
 async function explainPostgres(raw: postgres.Sql<{}>, query: string, params: unknown[]) {
   return raw.begin(async (tx) => {
     await tx.unsafe("SET LOCAL enable_seqscan = off");
-    const rows = await tx.unsafe(`EXPLAIN (FORMAT JSON) ${query}`, params as never[]) as Array<{
-      Plan: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] };
-    }>;
-    const root = rows[0]?.Plan;
+    const rows = await tx.unsafe(`EXPLAIN (FORMAT JSON) ${query}`, params as never[]);
+    const root = parseExplainPlan(rows);
     return {
       nodeType: root?.["Node Type"] ?? "unknown",
       usesIndex: planUsesIndex(root),
@@ -162,7 +160,27 @@ async function explainPostgres(raw: postgres.Sql<{}>, query: string, params: unk
   });
 }
 
-function planUsesIndex(plan?: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] }): boolean {
+type ExplainPlanNode = { "Node Type": string; "Index Name"?: string; Plans?: unknown[] };
+
+function parseExplainPlan(rows: unknown): ExplainPlanNode | undefined {
+  const first = Array.isArray(rows) ? rows[0] : rows;
+  if (!first || typeof first !== "object") return undefined;
+  const record = first as Record<string, unknown>;
+  if (record.Plan && typeof record.Plan === "object") {
+    return record.Plan as ExplainPlanNode;
+  }
+  const queryPlan = record["QUERY PLAN"];
+  if (typeof queryPlan === "string") {
+    const parsed = JSON.parse(queryPlan) as Array<{ Plan: ExplainPlanNode }>;
+    return parsed[0]?.Plan;
+  }
+  if (Array.isArray(queryPlan)) {
+    return (queryPlan[0] as { Plan: ExplainPlanNode })?.Plan;
+  }
+  return undefined;
+}
+
+function planUsesIndex(plan?: ExplainPlanNode): boolean {
   if (!plan) return false;
   if (plan["Index Name"]) return true;
   const node = plan["Node Type"];
