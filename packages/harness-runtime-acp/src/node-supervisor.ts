@@ -10,10 +10,11 @@ import { resolveKnownAgent } from "@open-managed-agents/acp-runtime/registry";
 import { NodeSpawner } from "@open-managed-agents/acp-runtime/node-spawner";
 import {
   managedMcpProxyFromWorkEnvironment,
-  projectAcpSandboxHostedInferenceEnv,
   projectAcpSandboxMcpServers,
 } from "@open-managed-agents/acp-runtime/sandbox-agent";
-import type { AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
+import { inferenceTargetFromWireModel } from "@open-managed-agents/acp-runtime/inference";
+import { wireHostedInferenceForAcpLaunch } from "@open-managed-agents/harness-inference-adapters";
+import { bindAcpAgentState, type AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 import {
   serveHarnessSupervisorJsonl,
   type HarnessSupervisorHarness,
@@ -209,22 +210,40 @@ export function createNodeManagedAcpSupervisorApp(
         const scrubbedEnvironment = Object.fromEntries(
           CONTROL_PLANE_ENV_KEYS.map((key) => [key, undefined]),
         );
-        const agent: AcpStatefulAgentSpec = {
+        const baseAgent: AcpStatefulAgentSpec = {
           ...resolved,
           id: resolved.id ?? options.agentId ?? harness.id,
           cwd: resolved.cwd ?? "/workspace",
-          env: projectAcpSandboxHostedInferenceEnv({
-            sessionId: session.id,
-            gatewayBaseUrl: active.proxy.gatewayBaseUrl,
-            sessionsToken: active.proxy.sessionsToken,
-            env: {
-              ...(resolved.env ?? {}),
-              ...scrubbedEnvironment,
-              ...(active.outputPath === null
-                ? { OUTPUT_PATH: undefined }
-                : { OUTPUT_PATH: active.outputPath }),
-            },
-          }),
+          env: {
+            ...(resolved.env ?? {}),
+            ...scrubbedEnvironment,
+            ...(active.outputPath === null
+              ? { OUTPUT_PATH: undefined }
+              : { OUTPUT_PATH: active.outputPath }),
+          },
+        };
+        const binding = bindAcpAgentState({
+          sessionId: session.id,
+          agent: baseAgent,
+        });
+        const modelHandle = typeof session.agent.model === "string"
+          ? session.agent.model
+          : session.agent.model.id;
+        const hosted = wireHostedInferenceForAcpLaunch({
+          sessionId: session.id,
+          gatewayBaseUrl: active.proxy.gatewayBaseUrl,
+          sessionsToken: active.proxy.sessionsToken,
+          env: baseAgent.env ?? {},
+          agent: binding.agent,
+          nativePath: binding.nativePath,
+          target: inferenceTargetFromWireModel(modelHandle),
+        });
+        for (const file of hosted.files) {
+          await stateIo.writeFile(file.path, file.content);
+        }
+        const agent: AcpStatefulAgentSpec = {
+          ...baseAgent,
+          env: hosted.env,
         };
         return {
           agent,

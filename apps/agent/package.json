@@ -33,6 +33,7 @@
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/acp-runtime": "workspace:*",
+    "@open-managed-agents/harness-inference-adapters": "workspace:*",
     "@open-managed-agents/browser-harness": "workspace:*",
     "@open-managed-agents/cap": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",

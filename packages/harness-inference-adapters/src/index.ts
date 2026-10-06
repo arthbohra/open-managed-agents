@@ -1,0 +1,12 @@
+export { createDefaultHarnessInferenceAdapterRegistry } from "./registry.js";
+export { wireHostedInferenceForAcpLaunch } from "./wire.js";
+export type { WireHostedInferenceInput } from "./wire.js";
+export { createEnvMappingInferenceAdapter } from "./adapters/env-mapping.js";
+export type { EnvMappingInferenceRule } from "./adapters/env-mapping.js";
+export { piInferenceAdapter } from "./adapters/pi.js";
+export { dshInferenceAdapter } from "./adapters/dsh.js";
+export { claudeInferenceAdapter } from "./adapters/claude.js";
+export { codexInferenceAdapter } from "./adapters/codex.js";
+export { geminiInferenceAdapter } from "./adapters/gemini.js";
+export { opencodeInferenceAdapter } from "./adapters/opencode.js";
+export { kimiCodeInferenceAdapter } from "./adapters/kimi.js";

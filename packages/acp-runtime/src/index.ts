@@ -44,12 +44,14 @@ export {
   hasRequiredAcpSandboxAgentState,
   managedMcpProxyFromWorkEnvironment,
   materializeAcpSandboxAgentState,
+  materializeHostedInferenceConfigFiles,
   projectAcpSandboxMcpServers,
   prepareAcpSandboxAgent,
   releaseAcpSandboxAgentState,
   restoreAcpSandboxAgentState,
   resolveAcpSandboxAgentAdapter,
 } from "./sandbox-agent.js";
+export * from "./inference/index.js";
 export type {
   AcpSandboxAgentAdapterDescriptor,
   AcpSandboxAgentLaunchSpec,
