@@ -5182,7 +5182,7 @@ export class SessionDO extends DurableObject<Env> {
       ? resolveRepositoryLocalPath(
           sessionResourceRows.map((row) => ({
             type: row.type,
-            resource: row.resource as Record<string, unknown>,
+            resource: row.resource as unknown as Record<string, unknown>,
           })),
         )
       : undefined;
