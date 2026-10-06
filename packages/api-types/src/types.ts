@@ -1067,6 +1067,8 @@ export interface SessionResource {
   // They go to separate KV keys: secret:{sessionId}:{resourceId}
   credential_id?: string;
   mount_path?: string;
+  /** Host filesystem path for a repository on a local ACP runtime (not cloned in cloud). */
+  local_path?: string;
   access?: "read_write" | "read_only";
   /**
    * Per-attachment guidance the agent receives alongside the store's
