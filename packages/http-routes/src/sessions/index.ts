@@ -305,6 +305,7 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
         file_id?: string;
         memory_store_id?: string;
         mount_path?: string;
+        local_path?: string;
         access?: "read_write" | "read_only";
         instructions?: string;
         url?: string;
@@ -431,6 +432,9 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
           url: repoUrl,
           repo_url: repoUrl,
           mount_path: res.mount_path || "/workspace",
+          ...(typeof res.local_path === "string" && res.local_path.trim()
+            ? { local_path: res.local_path.trim() }
+            : {}),
           checkout: res.checkout,
         });
       } else if ((res.type === "env" || res.type === "env_secret") && res.name && res.value) {

@@ -30,6 +30,7 @@
 import type { HarnessInterface, HarnessContext, HarnessRuntime, HarnessPendingInterruptContext } from "./interface";
 import type { SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import { AcpTranslator } from "./acp-translate";
+import { augmentAcpUserPrompt } from "./acp-proxy-delivery";
 import { generateEventId, log, logError, logWarn } from "@open-managed-agents/shared";
 
 interface AttachedWs {
@@ -43,7 +44,8 @@ interface AttachedWs {
 }
 
 export class AcpProxyHarness implements HarnessInterface {
-  // No platform reminders for ACP path — the spawn-cwd AGENTS.md handles it.
+  // Platform context is delivered via session.prompt when cwd is the project
+  // directory; otherwise the daemon scratch dir still carries AGENTS.md.
   async onSessionInit(): Promise<void> {
     /* no-op */
   }
@@ -185,9 +187,11 @@ export class AcpProxyHarness implements HarnessInterface {
 
       // Idempotent session.start — daemon spawns ACP child on first call,
       // short-circuits to session.ready on subsequent calls for the same sid.
+      const projectCwd = ctx.acpSessionStartCwd?.trim();
       channel.send({
         type: "session.start",
         agent_id: binding.acp_agent_id,
+        ...(projectCwd ? { cwd: projectCwd } : {}),
       });
       await channel.take((m) => m.type === "session.ready" || m.type === "session.error", 60_000)
         .then((m) => {
@@ -196,7 +200,14 @@ export class AcpProxyHarness implements HarnessInterface {
 
       recoverable = Array.isArray(attached.capabilities) && attached.capabilities.includes("durable_session_events_v1");
       if (resumed) sendResponse();
-      else channel.send({ type: "session.prompt", turn_id: turnId, text: userText });
+      else {
+        const promptText = augmentAcpUserPrompt(userText, {
+          sessionId: sid,
+          systemPrompt: ctx.systemPrompt,
+          projectCwd: projectCwd || undefined,
+        });
+        channel.send({ type: "session.prompt", turn_id: turnId, text: promptText });
+      }
 
       // Consume in order: completing while asynchronous translation is still
       // pending can lose the final text/usage. The inbox is installed before
