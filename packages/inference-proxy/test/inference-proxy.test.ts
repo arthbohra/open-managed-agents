@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyHostedInferenceToAgentEnv,
   buildHostedInferenceBaseUrl,
+  copyInboundHeadersForUpstream,
+  extractHostedInferenceProxyToken,
   forwardHostedInferenceRequest,
+  INBOUND_CREDENTIAL_HEADER_NAMES,
   resolveUpstreamInferenceUrl,
 } from "../src/index";
 
@@ -41,12 +44,79 @@ describe("hosted inference proxy helpers", () => {
       provider: "deepseek",
     })).toBe("https://api.deepseek.com/v1/chat/completions");
     expect(resolveUpstreamInferenceUrl({
+      subPath: "v1/messages",
+      baseURL: "https://api.anthropic.com/v1",
+      provider: "anthropic",
+    })).toBe("https://api.anthropic.com/v1/messages");
+    expect(resolveUpstreamInferenceUrl({
+      subPath: "v1/v1/messages",
+      baseURL: "https://api.anthropic.com/v1",
+      provider: "anthropic",
+    })).toBe("https://api.anthropic.com/v1/messages");
+    expect(resolveUpstreamInferenceUrl({
       subPath: "v1/chat/completions",
       provider: "deepseek",
     })).toBe("https://api.deepseek.com/v1/chat/completions");
   });
 
-  it("forwards with the resolved model-card bearer", async () => {
+  describe("extractHostedInferenceProxyToken", () => {
+    it("accepts bearer-only credentials", () => {
+      expect(extractHostedInferenceProxyToken(new Headers({
+        authorization: "Bearer session-token",
+      }))).toEqual({
+        status: "ok",
+        token: "session-token",
+        transport: "bearer",
+      });
+    });
+
+    it("accepts x-api-key-only credentials", () => {
+      expect(extractHostedInferenceProxyToken(new Headers({
+        "x-api-key": "session-token",
+      }))).toEqual({
+        status: "ok",
+        token: "session-token",
+        transport: "x-api-key",
+      });
+    });
+
+    it("requires both transports to agree when present", () => {
+      expect(extractHostedInferenceProxyToken(new Headers({
+        authorization: "Bearer session-token",
+        "x-api-key": "session-token",
+      }))).toEqual({
+        status: "ok",
+        token: "session-token",
+        transport: "bearer",
+      });
+      expect(extractHostedInferenceProxyToken(new Headers({
+        authorization: "Bearer one",
+        "x-api-key": "two",
+      }))).toEqual({ status: "mismatch" });
+    });
+
+    it("reports missing credentials", () => {
+      expect(extractHostedInferenceProxyToken(new Headers())).toEqual({ status: "missing" });
+    });
+  });
+
+  it("strips inbound credential headers before forwarding", () => {
+    const inbound = new Headers({
+      authorization: "Bearer sk-ant-req-v1.sandbox",
+      "x-api-key": "sandbox-key",
+      "api-key": "legacy",
+      "x-goog-api-key": "gemini",
+      "proxy-authorization": "Basic abc",
+      "content-type": "application/json",
+    });
+    const outbound = copyInboundHeadersForUpstream(inbound);
+    for (const name of INBOUND_CREDENTIAL_HEADER_NAMES) {
+      expect(outbound.has(name)).toBe(false);
+    }
+    expect(outbound.get("content-type")).toBe("application/json");
+  });
+
+  it("forwards with the resolved model-card bearer and no inbound credentials", async () => {
     const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
     const response = await forwardHostedInferenceRequest({
       upstream: {
@@ -59,6 +129,7 @@ describe("hosted inference proxy helpers", () => {
       subPath: "v1/chat/completions",
       inboundHeaders: new Headers({
         authorization: "Bearer sk-ant-req-v1.sandbox",
+        "x-api-key": "sandbox-key",
         "content-type": "application/json",
       }),
       body: new TextEncoder().encode("{}").buffer,
@@ -68,6 +139,79 @@ describe("hosted inference proxy helpers", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     const [url, init] = fetcher.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://api.deepseek.com/v1/chat/completions");
-    expect((init.headers as Headers).get("authorization")).toBe("Bearer upstream-key");
+    const headers = init.headers as Headers;
+    expect(headers.get("authorization")).toBe("Bearer upstream-key");
+    expect(headers.has("x-api-key")).toBe(false);
+  });
+
+  it("routes protocol-prefixed openai and anthropic paths to model-card upstream bases", async () => {
+    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+    const endpoints = [
+      {
+        protocol: "openai-chat" as const,
+        proxyPathSegment: "openai/v1",
+        upstreamBaseUrl: "https://api.deepseek.com",
+      },
+      {
+        protocol: "anthropic-messages" as const,
+        proxyPathSegment: "anthropic",
+        upstreamBaseUrl: "https://api.deepseek.com/anthropic",
+      },
+    ];
+    await forwardHostedInferenceRequest({
+      upstream: {
+        wireModel: "deepseek-chat",
+        apiKey: "upstream-key",
+        provider: "deepseek",
+        protocolEndpoints: endpoints,
+      },
+      method: "POST",
+      subPath: "openai/v1/chat/completions",
+      inboundHeaders: new Headers({ authorization: "Bearer work" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    await forwardHostedInferenceRequest({
+      upstream: {
+        wireModel: "deepseek-chat",
+        apiKey: "upstream-key",
+        provider: "deepseek",
+        protocolEndpoints: endpoints,
+      },
+      method: "POST",
+      subPath: "anthropic/v1/messages",
+      inboundHeaders: new Headers({ "x-api-key": "work" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    const urls = fetcher.mock.calls.map((call) => (call as [string])[0]);
+    expect(urls).toEqual([
+      "https://api.deepseek.com/v1/chat/completions",
+      "https://api.deepseek.com/anthropic/v1/messages",
+    ]);
+  });
+
+  it("uses x-api-key for anthropic upstream providers", async () => {
+    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+    await forwardHostedInferenceRequest({
+      upstream: {
+        wireModel: "claude-sonnet-4-6",
+        apiKey: "upstream-key",
+        baseURL: "https://api.anthropic.com/v1",
+        provider: "anthropic",
+      },
+      method: "POST",
+      subPath: "v1/messages",
+      inboundHeaders: new Headers({
+        authorization: "Bearer sk-ant-req-v1.sandbox",
+        "x-api-key": "sandbox-key",
+      }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Headers;
+    expect(headers.get("x-api-key")).toBe("upstream-key");
+    expect(headers.has("authorization")).toBe(false);
   });
 });

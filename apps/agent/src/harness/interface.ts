@@ -295,6 +295,15 @@ export interface HarnessContext {
     hostedInference?: {
       gatewayBaseUrl: string;
       sessionsToken: string;
+      model?: {
+        providerId: string;
+        baseUrl: string | null;
+        protocolEndpoints?: readonly {
+          protocol: "anthropic-messages" | "openai-chat" | "openai-responses" | "gemini";
+          proxyPathSegment: string;
+          upstreamBaseUrl: string;
+        }[];
+      };
     };
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */

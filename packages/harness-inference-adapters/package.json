@@ -1,5 +1,5 @@
 {
-  "name": "@open-managed-agents/auth",
+  "name": "@open-managed-agents/harness-inference-adapters",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@open-managed-agents/inference-proxy": "workspace:*",
-    "hono": "^4.7.0"
+    "@open-managed-agents/acp-runtime": "workspace:*",
+    "@open-managed-agents/inference-proxy": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.3"
   }
 }

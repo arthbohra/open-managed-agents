@@ -2,7 +2,7 @@
  * Hosted inference proxy — OpenAI-compatible model calls from harness-in-sandbox
  * ACP agents without placing provider API keys in the sandbox address space.
  *
- * Auth: workspace API key or current Work sessions_token (same as MCP gateway).
+ * Auth: workspace API key or current Work sessions_token via Bearer or x-api-key.
  * Upstream credentials resolve from the session agent's model card on the host.
  */
 
@@ -12,7 +12,10 @@ import type { Services } from "@open-managed-agents/services";
 import type { KvStore } from "@open-managed-agents/kv-store";
 import {
   bindStoredModelCardCredentials,
+  extractHostedInferenceProxyToken,
   forwardHostedInferenceRequest,
+  resolveProtocolEndpointsFromModelCard,
+  type InferenceProtocolEndpoint,
 } from "@open-managed-agents/inference-proxy";
 import { SqlSessionSource } from "@open-managed-agents/managed-agents-adapters-sql";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
@@ -39,6 +42,8 @@ export async function resolveSessionModelUpstream(
   apiKey: string;
   baseURL?: string;
   provider?: string;
+  providerId?: string;
+  protocolEndpoints?: readonly InferenceProtocolEndpoint[];
   customHeaders?: Record<string, string>;
 } | null> {
   const managed = sessionSource
@@ -76,11 +81,17 @@ export async function resolveSessionModelUpstream(
       const key = await services.modelCards.getApiKey({ tenantId, cardId: card.id });
       if (key) {
         const bound = bindStoredModelCardCredentials(fallback, card, key);
+        const protocolEndpoints = resolveProtocolEndpointsFromModelCard({
+          providerId: card.provider,
+          baseUrl: card.base_url,
+        });
         return {
           wireModel: bound.wireModel,
           apiKey: bound.apiKey,
           baseURL: bound.baseURL,
           provider: bound.provider,
+          providerId: card.provider,
+          protocolEndpoints,
           customHeaders: bound.customHeaders,
         };
       }
@@ -141,10 +152,14 @@ app.all("/:sid/*", async (c) => {
     : "";
   let tenantId = (c.var as { tenant_id?: string }).tenant_id;
   if (!tenantId) {
-    const auth = c.req.header("authorization") ?? "";
-    const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
-    if (!apiKey) return c.json({ error: "missing bearer" }, 401);
-    tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey) ?? undefined;
+    const presented = extractHostedInferenceProxyToken(c.req.raw.headers);
+    if (presented.status === "missing") {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    if (presented.status === "mismatch") {
+      return c.json({ error: "Conflicting credentials" }, 401);
+    }
+    tenantId = await apiKeyToTenantId(c.var.services.kv, presented.token) ?? undefined;
     if (!tenantId) return c.json({ error: "forbidden" }, 403);
   }
   const services = c.get("services");

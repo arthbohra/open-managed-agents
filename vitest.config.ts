@@ -351,6 +351,10 @@ export default defineConfig({
       { find: "@open-managed-agents/acp-runtime/sandbox-spawner", replacement: "./packages/acp-runtime/src/spawners/sandbox.ts" },
       { find: "@open-managed-agents/acp-runtime/node-spawner", replacement: "./packages/acp-runtime/src/node-spawner.ts" },
       { find: "@open-managed-agents/acp-runtime/registry", replacement: "./packages/acp-runtime/src/registry.ts" },
+      {
+        find: "@open-managed-agents/acp-runtime/inference-config",
+        replacement: "./packages/acp-runtime/src/inference/index.ts",
+      },
       { find: "@open-managed-agents/acp-runtime", replacement: "./packages/acp-runtime/src/index.ts" },
 
       // ─── v2 composition SDK (package name intentionally shorter than folder) ───

@@ -1,3 +1,10 @@
+import type { InferenceProtocolEndpoint, InferenceWireProtocol } from "./protocol-types.js";
+import {
+  parseHostedInferenceSubPath,
+  resolveProtocolUpstreamUrl,
+  selectProtocolEndpoint,
+} from "./protocol-routing.js";
+
 /** Env vars that must not reach an ACP child when hosted inference proxying is on. */
 export const MODEL_PROVIDER_SECRET_ENV_KEYS = [
   "DEEPSEEK_API_KEY",
@@ -11,16 +18,38 @@ export const MODEL_PROVIDER_SECRET_ENV_KEYS = [
   "OPENROUTER_API_KEY",
 ] as const;
 
+/** Inbound headers that carry caller or provider credentials — never forwarded upstream. */
+export const INBOUND_CREDENTIAL_HEADER_NAMES = [
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key",
+  "proxy-authorization",
+] as const;
+
 export interface HostedInferenceCapability {
   gatewayBaseUrl: string;
   sessionsToken: string;
 }
+
+export type { InferenceProtocolEndpoint, InferenceWireProtocol } from "./protocol-types.js";
+export {
+  resolveProtocolEndpointsFromModelCard,
+  type ModelCardInferenceFields,
+} from "./endpoint-catalog.js";
+export {
+  parseHostedInferenceSubPath,
+  resolveProtocolUpstreamUrl,
+  selectProtocolEndpoint,
+} from "./protocol-routing.js";
 
 export interface ResolvedSessionModelUpstream {
   wireModel: string;
   apiKey: string;
   baseURL?: string;
   provider?: string;
+  providerId?: string;
+  protocolEndpoints?: readonly InferenceProtocolEndpoint[];
   customHeaders?: Record<string, string>;
 }
 
@@ -106,6 +135,38 @@ export function applyHostedInferenceToAgentEnv(input: {
   };
 }
 
+export function isHostedInferenceProxyPath(path: string): boolean {
+  return /^\/v1\/oma\/inference-proxy\/[^/]+/u.test(path);
+}
+
+function bearerTokenFromAuthorization(authorization: string | null | undefined): string | null {
+  if (!authorization) return null;
+  if (authorization.startsWith("Bearer ")) {
+    const token = authorization.slice("Bearer ".length).trim();
+    return token.length > 0 ? token : null;
+  }
+  const trimmed = authorization.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export type HostedInferenceProxyTokenResult =
+  | { status: "ok"; token: string; transport: "bearer" | "x-api-key" }
+  | { status: "missing" }
+  | { status: "mismatch" };
+
+/** Parse the session / workspace token presented to the hosted inference proxy. */
+export function extractHostedInferenceProxyToken(
+  headers: Headers,
+): HostedInferenceProxyTokenResult {
+  const bearer = bearerTokenFromAuthorization(headers.get("authorization"));
+  const apiKey = headers.get("x-api-key")?.trim() || null;
+  if (!bearer && !apiKey) return { status: "missing" };
+  if (bearer && apiKey && bearer !== apiKey) return { status: "mismatch" };
+  const token = bearer ?? apiKey!;
+  const transport = bearer ? "bearer" : "x-api-key";
+  return { status: "ok", token, transport };
+}
+
 /** Join model-card base URL with the OpenAI-compatible subpath from the sandbox client. */
 export function resolveUpstreamInferenceUrl(input: {
   subPath: string;
@@ -118,10 +179,11 @@ export function resolveUpstreamInferenceUrl(input: {
   const root = trimmedBase
     ?? (input.provider ? DEFAULT_PROVIDER_BASES[input.provider] : undefined);
   if (!root) return null;
-  if (root.endsWith("/v1") && sub.startsWith("v1/")) {
-    return `${root}/${sub.slice("v1/".length)}`;
+  let relative = sub;
+  while (root.endsWith("/v1") && relative.startsWith("v1/")) {
+    relative = relative.slice("v1/".length);
   }
-  return `${root}/${sub}`;
+  return `${root}/${relative}`;
 }
 
 const HOP_BY_HOP = new Set([
@@ -137,6 +199,72 @@ const HOP_BY_HOP = new Set([
   "content-length",
 ]);
 
+const INBOUND_CREDENTIAL_HEADERS = new Set(
+  INBOUND_CREDENTIAL_HEADER_NAMES.map((name) => name.toLowerCase()),
+);
+
+export function copyInboundHeadersForUpstream(inboundHeaders: Headers): Headers {
+  const outbound = new Headers();
+  for (const [name, value] of inboundHeaders.entries()) {
+    const lower = name.toLowerCase();
+    if (HOP_BY_HOP.has(lower) || INBOUND_CREDENTIAL_HEADERS.has(lower)) continue;
+    outbound.set(name, value);
+  }
+  return outbound;
+}
+
+function isAnthropicProvider(provider: string | undefined): boolean {
+  if (!provider) return false;
+  return /^(ant|anthropic|ant-compatible)$/i.test(provider);
+}
+
+function isGeminiProvider(provider: string | undefined): boolean {
+  if (!provider) return false;
+  return /^(gemini|google)$/i.test(provider);
+}
+
+/** Apply the upstream provider's expected credential header scheme. */
+export function applyUpstreamProviderCredentials(
+  headers: Headers,
+  upstream: Pick<ResolvedSessionModelUpstream, "apiKey" | "provider">,
+): void {
+  for (const name of INBOUND_CREDENTIAL_HEADER_NAMES) {
+    headers.delete(name);
+  }
+  if (isAnthropicProvider(upstream.provider)) {
+    headers.set("x-api-key", upstream.apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  if (isGeminiProvider(upstream.provider)) {
+    headers.set("x-goog-api-key", upstream.apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  headers.set("authorization", `Bearer ${upstream.apiKey}`);
+}
+
+export function applyUpstreamCredentialsForProtocol(
+  headers: Headers,
+  protocol: InferenceWireProtocol,
+  apiKey: string,
+): void {
+  for (const name of INBOUND_CREDENTIAL_HEADER_NAMES) {
+    headers.delete(name);
+  }
+  if (protocol === "anthropic-messages") {
+    headers.set("x-api-key", apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  if (protocol === "gemini") {
+    headers.set("x-goog-api-key", apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  headers.set("authorization", `Bearer ${apiKey}`);
+}
+
 /** Forward an OpenAI-compatible inference call using host-resolved credentials. */
 export async function forwardHostedInferenceRequest(input: {
   upstream: ResolvedSessionModelUpstream;
@@ -146,21 +274,37 @@ export async function forwardHostedInferenceRequest(input: {
   body: ArrayBuffer | null;
   fetcher?: typeof fetch;
 }): Promise<Response> {
-  const upstreamUrl = resolveUpstreamInferenceUrl({
-    subPath: input.subPath,
-    baseURL: input.upstream.baseURL,
-    provider: input.upstream.provider,
-  });
+  const parsed = parseHostedInferenceSubPath(input.subPath);
+  let upstreamUrl: string | null = null;
+  const outbound = copyInboundHeadersForUpstream(input.inboundHeaders);
+  if (
+    parsed.protocol
+    && input.upstream.protocolEndpoints
+    && input.upstream.protocolEndpoints.length > 0
+  ) {
+    const endpoint = selectProtocolEndpoint(
+      input.upstream.protocolEndpoints,
+      parsed.protocol,
+    );
+    if (!endpoint) {
+      return Response.json(
+        { error: "inference_protocol_unsupported", protocol: parsed.protocol },
+        { status: 409 },
+      );
+    }
+    upstreamUrl = resolveProtocolUpstreamUrl(endpoint, parsed.relativeSubPath);
+    applyUpstreamCredentialsForProtocol(outbound, parsed.protocol, input.upstream.apiKey);
+  } else {
+    upstreamUrl = resolveUpstreamInferenceUrl({
+      subPath: input.subPath,
+      baseURL: input.upstream.baseURL,
+      provider: input.upstream.provider,
+    });
+    applyUpstreamProviderCredentials(outbound, input.upstream);
+  }
   if (!upstreamUrl) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
-  const outbound = new Headers();
-  for (const [name, value] of input.inboundHeaders.entries()) {
-    const lower = name.toLowerCase();
-    if (HOP_BY_HOP.has(lower) || lower === "authorization") continue;
-    outbound.set(name, value);
-  }
-  outbound.set("authorization", `Bearer ${input.upstream.apiKey}`);
   if (input.upstream.customHeaders) {
     for (const [name, value] of Object.entries(input.upstream.customHeaders)) {
       outbound.set(name, value);
