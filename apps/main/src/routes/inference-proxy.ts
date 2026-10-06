@@ -15,6 +15,7 @@ import {
   extractHostedInferenceProxyToken,
   forwardHostedInferenceRequest,
   resolveProtocolEndpointsFromModelCard,
+  type InferenceProtocolEndpoint,
 } from "@open-managed-agents/inference-proxy";
 import { SqlSessionSource } from "@open-managed-agents/managed-agents-adapters-sql";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
@@ -41,6 +42,8 @@ export async function resolveSessionModelUpstream(
   apiKey: string;
   baseURL?: string;
   provider?: string;
+  providerId?: string;
+  protocolEndpoints?: readonly InferenceProtocolEndpoint[];
   customHeaders?: Record<string, string>;
 } | null> {
   const managed = sessionSource

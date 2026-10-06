@@ -149,24 +149,26 @@ export class AcpSandboxHarness implements HarnessInterface {
         const modelHandle = typeof ctx.agent.model === "string"
           ? ctx.agent.model
           : ctx.agent.model.id;
-        const hostedInference = ctx.env.hostedInference ?? (
-          managedMcpProxy === null
-            ? undefined
-            : {
-              gatewayBaseUrl: managedMcpProxy.gatewayBaseUrl,
-              sessionsToken: managedMcpProxy.sessionsToken,
-            }
-        );
         let launchEnv = preparation.launch.env;
+        const hostedInference = ctx.env.hostedInference;
         if (hostedInference) {
           const inferenceModel = hostedInference.model;
           if (!inferenceModel?.providerId) {
             throw new InferenceEndpointsMissingError();
           }
+          const capability = {
+            gatewayBaseUrl: hostedInference.gatewayBaseUrl
+              ?? managedMcpProxy?.gatewayBaseUrl,
+            sessionsToken: hostedInference.sessionsToken
+              ?? managedMcpProxy?.sessionsToken,
+          };
+          if (!capability.gatewayBaseUrl || !capability.sessionsToken) {
+            throw new InferenceEndpointsMissingError();
+          }
           const hosted = wireHostedInferenceForAcpLaunch({
             sessionId: ctx.session_id,
-            gatewayBaseUrl: hostedInference.gatewayBaseUrl,
-            sessionsToken: hostedInference.sessionsToken,
+            gatewayBaseUrl: capability.gatewayBaseUrl,
+            sessionsToken: capability.sessionsToken,
             env: preparation.launch.env,
             agent: preparation.binding.agent,
             nativePath: preparation.binding.nativePath,
