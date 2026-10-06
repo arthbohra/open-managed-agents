@@ -12,10 +12,7 @@ import {
   managedMcpProxyFromWorkEnvironment,
   projectAcpSandboxMcpServers,
 } from "@open-managed-agents/acp-runtime/sandbox-agent";
-import {
-  InferenceEndpointsMissingError,
-  type InferenceWireProtocol,
-} from "@open-managed-agents/acp-runtime/inference-config";
+import type { InferenceWireProtocol } from "@open-managed-agents/acp-runtime/inference-config";
 import { wireHostedInferenceForAcpLaunch } from "@open-managed-agents/harness-inference-adapters";
 import { bindAcpAgentState, type AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 import {
@@ -241,35 +238,35 @@ export function createNodeManagedAcpSupervisorApp(
         const modelHandle = typeof session.agent.model === "string"
           ? session.agent.model
           : session.agent.model.id;
+        let agent: AcpStatefulAgentSpec = baseAgent;
         const inference = session.agent.inference;
-        if (!inference?.provider_id) {
-          throw new InferenceEndpointsMissingError();
+        if (inference?.provider_id) {
+          const hosted = wireHostedInferenceForAcpLaunch({
+            sessionId: session.id,
+            gatewayBaseUrl: active.proxy.gatewayBaseUrl,
+            sessionsToken: active.proxy.sessionsToken,
+            env: baseAgent.env ?? {},
+            agent: binding.agent,
+            nativePath: binding.nativePath,
+            model: {
+              wireModel: modelHandle,
+              providerId: inference.provider_id,
+              baseUrl: inference.base_url,
+              protocolEndpoints: inference.protocol_endpoints?.map((endpoint) => ({
+                protocol: endpoint.protocol as InferenceWireProtocol,
+                proxyPathSegment: endpoint.proxy_path_segment,
+                upstreamBaseUrl: endpoint.upstream_base_url,
+              })),
+            },
+          });
+          for (const file of hosted.files) {
+            await stateIo.writeFile(file.path, file.content);
+          }
+          agent = {
+            ...baseAgent,
+            env: hosted.env,
+          };
         }
-        const hosted = wireHostedInferenceForAcpLaunch({
-          sessionId: session.id,
-          gatewayBaseUrl: active.proxy.gatewayBaseUrl,
-          sessionsToken: active.proxy.sessionsToken,
-          env: baseAgent.env ?? {},
-          agent: binding.agent,
-          nativePath: binding.nativePath,
-          model: {
-            wireModel: modelHandle,
-            providerId: inference.provider_id,
-            baseUrl: inference.base_url,
-            protocolEndpoints: inference.protocol_endpoints?.map((endpoint) => ({
-              protocol: endpoint.protocol as InferenceWireProtocol,
-              proxyPathSegment: endpoint.proxy_path_segment,
-              upstreamBaseUrl: endpoint.upstream_base_url,
-            })),
-          },
-        });
-        for (const file of hosted.files) {
-          await stateIo.writeFile(file.path, file.content);
-        }
-        const agent: AcpStatefulAgentSpec = {
-          ...baseAgent,
-          env: hosted.env,
-        };
         return {
           agent,
           mcpServers: projectAcpSandboxMcpServers({
