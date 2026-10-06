@@ -149,17 +149,21 @@ async function seedExplainFixtures(
 }
 
 async function explainPostgres(raw: postgres.Sql<{}>, query: string, params: unknown[]) {
-  await raw.unsafe("SET LOCAL enable_seqscan = off");
-  const [plan] = await raw.unsafe(`EXPLAIN (FORMAT JSON) ${query}`, params as never[]) as Array<[{ Plan: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] } }]>;
-  const root = plan.Plan;
-  const usesIndex = planUsesIndex(root);
-  return {
-    nodeType: root["Node Type"],
-    usesIndex,
-  };
+  return raw.begin(async (tx) => {
+    await tx.unsafe("SET LOCAL enable_seqscan = off");
+    const rows = await tx.unsafe(`EXPLAIN (FORMAT JSON) ${query}`, params as never[]) as Array<{
+      Plan: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] };
+    }>;
+    const root = rows[0]?.Plan;
+    return {
+      nodeType: root?.["Node Type"] ?? "unknown",
+      usesIndex: planUsesIndex(root),
+    };
+  });
 }
 
-function planUsesIndex(plan: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] }): boolean {
+function planUsesIndex(plan?: { "Node Type": string; "Index Name"?: string; Plans?: unknown[] }): boolean {
+  if (!plan) return false;
   if (plan["Index Name"]) return true;
   const node = plan["Node Type"];
   if (node === "Index Scan" || node === "Index Only Scan" || node === "Bitmap Index Scan") return true;
