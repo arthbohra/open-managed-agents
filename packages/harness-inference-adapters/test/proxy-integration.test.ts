@@ -1,5 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   applyUpstreamCredentialsForProtocol,
@@ -9,30 +8,6 @@ import {
 import { resolveProtocolEndpointsFromModelCard } from "@open-managed-agents/inference-proxy";
 
 import { wireHostedInferenceForAcpLaunch } from "../src/wire.js";
-
-async function withFakeUpstream(
-  handler: (req: IncomingMessage, res: ServerResponse) => void,
-  run: (port: number) => Promise<void>,
-): Promise<string[]> {
-  const seen: string[] = [];
-  const server = createServer((req, res) => {
-    seen.push(`${req.method} ${req.url}`);
-    handler(req, res);
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("expected bound port");
-  }
-  try {
-    await run(address.port);
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error?: Error) => (error ? reject(error) : resolve()));
-    });
-  }
-  return seen;
-}
 
 describe("hosted inference proxy integration", () => {
   it("routes pi openai and dsh anthropic subpaths to distinct upstream URLs", async () => {
@@ -62,44 +37,41 @@ describe("hosted inference proxy integration", () => {
     expect(piBase).toContain("/openai/v1");
     expect(dsh.env.DEEPSEEK_BASE_URL).toContain("/anthropic");
 
-    const seen = await withFakeUpstream((req, res) => {
-      res.statusCode = 200;
-      res.end("ok");
-    }, async (port) => {
-      const upstreamBase = `http://127.0.0.1:${port}`;
-      const patched = endpoints.map((endpoint) => ({
-        ...endpoint,
-        upstreamBaseUrl: endpoint.protocol === "openai-chat"
-          ? upstreamBase
-          : `${upstreamBase}/anthropic`,
-      }));
-      const upstream = {
-        wireModel: "deepseek-chat",
-        apiKey: "upstream-secret",
-        provider: "deepseek",
-        providerId: "deepseek",
-        protocolEndpoints: patched,
-      };
-      await forwardHostedInferenceRequest({
-        upstream,
-        method: "POST",
-        subPath: "openai/v1/chat/completions",
-        inboundHeaders: new Headers({ authorization: "Bearer work-token" }),
-        body: new TextEncoder().encode("{}").buffer,
-        fetcher: fetch,
-      });
-      await forwardHostedInferenceRequest({
-        upstream,
-        method: "POST",
-        subPath: "anthropic/v1/messages",
-        inboundHeaders: new Headers({ "x-api-key": "work-token" }),
-        body: new TextEncoder().encode("{}").buffer,
-        fetcher: fetch,
-      });
+    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+    const upstreamBase = "http://127.0.0.1:9";
+    const patched = endpoints.map((endpoint) => ({
+      ...endpoint,
+      upstreamBaseUrl: endpoint.protocol === "openai-chat"
+        ? upstreamBase
+        : `${upstreamBase}/anthropic`,
+    }));
+    const upstream = {
+      wireModel: "deepseek-chat",
+      apiKey: "upstream-secret",
+      provider: "deepseek",
+      providerId: "deepseek",
+      protocolEndpoints: patched,
+    };
+    await forwardHostedInferenceRequest({
+      upstream,
+      method: "POST",
+      subPath: "openai/v1/chat/completions",
+      inboundHeaders: new Headers({ authorization: "Bearer work-token" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
     });
-    expect(seen).toEqual([
-      "POST /v1/chat/completions",
-      "POST /anthropic/v1/messages",
+    await forwardHostedInferenceRequest({
+      upstream,
+      method: "POST",
+      subPath: "anthropic/v1/messages",
+      inboundHeaders: new Headers({ "x-api-key": "work-token" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    const urls = fetcher.mock.calls.map((call) => (call as [string])[0]);
+    expect(urls).toEqual([
+      "http://127.0.0.1:9/v1/chat/completions",
+      "http://127.0.0.1:9/anthropic/v1/messages",
     ]);
   });
 
