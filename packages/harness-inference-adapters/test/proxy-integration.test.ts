@@ -68,7 +68,9 @@ describe("hosted inference proxy integration", () => {
       body: new TextEncoder().encode("{}").buffer,
       fetcher,
     });
-    const urls = fetcher.mock.calls.map((call) => (call as [string])[0]);
+    const urls = fetcher.mock.calls.map(
+      (call) => (call as unknown as [string, RequestInit])[0],
+    );
     expect(urls).toEqual([
       "http://127.0.0.1:9/v1/chat/completions",
       "http://127.0.0.1:9/anthropic/v1/messages",
