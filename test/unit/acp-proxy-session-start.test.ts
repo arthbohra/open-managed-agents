@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AcpProxyHarness } from "../../apps/agent/src/harness/acp-proxy-loop";
 import type { HarnessContext } from "../../apps/agent/src/harness/interface";
 import {
   augmentAcpUserPrompt,
-  defaultAcpBundleRoot,
+  parseSessionReadyFrame,
   resolveRepositoryLocalPath,
 } from "../../apps/agent/src/harness/acp-proxy-delivery";
 
@@ -30,7 +30,7 @@ class Socket {
 }
 
 describe("resolveRepositoryLocalPath", () => {
-  it("prefers local_path over sandbox mount_path", () => {
+  it("returns explicit local_path", () => {
     expect(
       resolveRepositoryLocalPath([
         {
@@ -44,7 +44,7 @@ describe("resolveRepositoryLocalPath", () => {
     ).toBe("/home/user/project");
   });
 
-  it("uses non-/workspace mount_path when local_path is absent", () => {
+  it("ignores mount_path when local_path is absent", () => {
     expect(
       resolveRepositoryLocalPath([
         {
@@ -52,81 +52,138 @@ describe("resolveRepositoryLocalPath", () => {
           resource: { mount_path: "/Users/alice/repo" },
         },
       ]),
-    ).toBe("/Users/alice/repo");
+    ).toBeUndefined();
+  });
+});
+
+describe("parseSessionReadyFrame", () => {
+  it("reads bundle_dir and fresh from session.ready", () => {
+    expect(
+      parseSessionReadyFrame({
+        type: "session.ready",
+        bundle_dir: "/home/user/.oma/bridge/sessions/abc",
+        fresh: true,
+      }),
+    ).toEqual({
+      bundleDir: "/home/user/.oma/bridge/sessions/abc",
+      freshSpawn: true,
+    });
+  });
+
+  it("tolerates old daemons without bundle_dir", () => {
+    expect(parseSessionReadyFrame({ type: "session.ready", acp_session_id: "x" })).toEqual({
+      freshSpawn: false,
+    });
   });
 });
 
 describe("augmentAcpUserPrompt", () => {
-  it("points the agent at the daemon scratch bundle directory", () => {
-    const sessionId = "sess-oma3b-test";
+  it("includes platform context only on a fresh spawn with project cwd", () => {
     const prompt = augmentAcpUserPrompt("do work", {
-      sessionId,
       systemPrompt: "You are the OMA agent.",
       projectCwd: "/home/user/project",
+      bundleDir: "/scratch/bundle",
+      freshSpawn: true,
     });
-    const bundleRoot = defaultAcpBundleRoot(sessionId);
-    expect(prompt).toContain(bundleRoot);
+    expect(prompt).toContain("/scratch/bundle");
     expect(prompt).toContain("AGENTS.md");
     expect(prompt).toContain("You are the OMA agent.");
     expect(prompt).toContain("do work");
     expect(prompt).not.toContain("/home/user/project/AGENTS.md");
   });
+
+  it("does not repeat platform context on turn 2", () => {
+    expect(
+      augmentAcpUserPrompt("turn two", {
+        systemPrompt: "You are the OMA agent.",
+        projectCwd: "/home/user/project",
+        bundleDir: "/scratch/bundle",
+        freshSpawn: false,
+      }),
+    ).toBe("turn two");
+  });
+
+  it("skips path hints when bundle_dir is absent (old daemon)", () => {
+    const prompt = augmentAcpUserPrompt("do work", {
+      systemPrompt: "System.",
+      projectCwd: "/home/user/project",
+      freshSpawn: true,
+    });
+    expect(prompt).toContain("<openma-acp-platform>");
+    expect(prompt).not.toContain("Read `");
+  });
 });
 
-describe("AcpProxyHarness session.start cwd", () => {
-  it("forwards repository local path on session.start and delivers platform context via prompt", async () => {
-    const events: Array<Record<string, unknown>> = [];
-    let socket: Socket | undefined;
-    const context = {
-      agent: {
-        model: "test-model",
-        runtime_binding: { runtime_id: "runner", acp_agent_id: "codex-acp" },
+function harnessContext(overrides: {
+  sessionReady?: Record<string, unknown>;
+  userText?: string;
+}): HarnessContext {
+  const events: Array<Record<string, unknown>> = [];
+  let socket: Socket | undefined;
+  const userText = overrides.userText ?? "go";
+  const context = {
+    agent: {
+      model: "test-model",
+      runtime_binding: { runtime_id: "runner", acp_agent_id: "codex-acp" },
+    },
+    session_id: "remote-session",
+    tenant_id: "team",
+    acpSessionStartCwd: "/data/myproject",
+    systemPrompt: "System from OMA.",
+    userMessage: { type: "user.message", content: [{ type: "text", text: userText }] },
+    env: {
+      RUNTIME_ROOM: {
+        idFromName: (id: string) => id,
+        get: () => ({
+          fetch: async () => {
+            socket = new Socket();
+            socket.onSend = (frame) => {
+              if (frame.type === "session.start") {
+                socket!.receive(
+                  overrides.sessionReady ?? {
+                    type: "session.ready",
+                    acp_session_id: "native",
+                    bundle_dir: "/daemon/scratch/remote-session",
+                    fresh: true,
+                  },
+                );
+              }
+              if (frame.type === "session.prompt") {
+                socket!.receive({
+                  type: "session.complete",
+                  turn_id: frame.turn_id,
+                });
+              }
+            };
+            const ws = socket as Socket & { accept: () => void };
+            ws.accept = () => {
+              socket!.receive({ type: "attached", daemon_online: true });
+            };
+            return { status: 101, webSocket: ws };
+          },
+        }),
       },
-      session_id: "remote-session",
-      tenant_id: "team",
-      acpSessionStartCwd: "/data/myproject",
-      systemPrompt: "System from OMA.",
-      userMessage: { type: "user.message", content: [{ type: "text", text: "go" }] },
-      env: {
-        RUNTIME_ROOM: {
-          idFromName: (id: string) => id,
-          get: () => ({
-            fetch: async () => {
-              socket = new Socket();
-              socket.onSend = (frame) => {
-                if (frame.type === "session.start") {
-                  socket!.receive({ type: "session.ready", acp_session_id: "native" });
-                }
-                if (frame.type === "session.prompt") {
-                  socket!.receive({
-                    type: "session.complete",
-                    turn_id: frame.turn_id,
-                  });
-                }
-              };
-              const ws = socket as Socket & { accept: () => void };
-              ws.accept = () => {
-                socket!.receive({ type: "attached", daemon_online: true });
-              };
-              return { status: 101, webSocket: ws };
-            },
-          }),
-        },
-      },
-      runtime: {
-        history: { getEvents: () => events },
-        broadcast: (event: Record<string, unknown>) => events.push(event),
-        pendingConfirmations: [],
-        broadcastStreamStart: async () => {},
-        broadcastChunk: async () => {},
-        broadcastStreamEnd: async () => {},
-        broadcastThinkingStart: async () => {},
-        broadcastThinkingChunk: async () => {},
-        broadcastThinkingEnd: async () => {},
-      },
-    } as unknown as HarnessContext;
+    },
+    runtime: {
+      history: { getEvents: () => events },
+      broadcast: (event: Record<string, unknown>) => events.push(event),
+      pendingConfirmations: [],
+      broadcastStreamStart: async () => {},
+      broadcastChunk: async () => {},
+      broadcastStreamEnd: async () => {},
+      broadcastThinkingStart: async () => {},
+      broadcastThinkingChunk: async () => {},
+      broadcastThinkingEnd: async () => {},
+    },
+  } as unknown as HarnessContext;
+  return Object.assign(context, { _socket: () => socket });
+}
 
+describe("AcpProxyHarness session.start cwd", () => {
+  it("forwards repository local path on session.start and delivers platform context on turn 1", async () => {
+    const context = harnessContext({});
     await new AcpProxyHarness().run(context);
+    const socket = (context as { _socket: () => Socket })._socket();
 
     const start = socket!.sent.find((frame) => frame.type === "session.start");
     expect(start).toMatchObject({
@@ -138,7 +195,17 @@ describe("AcpProxyHarness session.start cwd", () => {
     const prompt = socket!.sent.find((frame) => frame.type === "session.prompt");
     expect(String(prompt?.text)).toContain("<openma-acp-platform>");
     expect(String(prompt?.text)).toContain("System from OMA.");
+    expect(String(prompt?.text)).toContain("/daemon/scratch/remote-session");
     expect(String(prompt?.text)).toContain("go");
-    expect(String(prompt?.text)).toContain(defaultAcpBundleRoot("remote-session"));
+  });
+
+  it("does not prepend platform context when session.ready lacks fresh", async () => {
+    const context = harnessContext({
+      sessionReady: { type: "session.ready", acp_session_id: "native" },
+    });
+    await new AcpProxyHarness().run(context);
+    const socket = (context as { _socket: () => Socket })._socket();
+    const prompt = socket!.sent.find((frame) => frame.type === "session.prompt");
+    expect(prompt?.text).toBe("go");
   });
 });

@@ -30,7 +30,7 @@
 import type { HarnessInterface, HarnessContext, HarnessRuntime, HarnessPendingInterruptContext } from "./interface";
 import type { SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import { AcpTranslator } from "./acp-translate";
-import { augmentAcpUserPrompt } from "./acp-proxy-delivery";
+import { augmentAcpUserPrompt, parseSessionReadyFrame } from "./acp-proxy-delivery";
 import { generateEventId, log, logError, logWarn } from "@open-managed-agents/shared";
 
 interface AttachedWs {
@@ -193,18 +193,23 @@ export class AcpProxyHarness implements HarnessInterface {
         agent_id: binding.acp_agent_id,
         ...(projectCwd ? { cwd: projectCwd } : {}),
       });
-      await channel.take((m) => m.type === "session.ready" || m.type === "session.error", 60_000)
-        .then((m) => {
-          if (m.type === "session.error") throw new Error(`session.start failed: ${m.message ?? "unknown"}`);
-        });
+      const readyFrame = await channel.take(
+        (m) => m.type === "session.ready" || m.type === "session.error",
+        60_000,
+      );
+      if (readyFrame.type === "session.error") {
+        throw new Error(`session.start failed: ${readyFrame.message ?? "unknown"}`);
+      }
+      const { bundleDir, freshSpawn } = parseSessionReadyFrame(record(readyFrame));
 
       recoverable = Array.isArray(attached.capabilities) && attached.capabilities.includes("durable_session_events_v1");
       if (resumed) sendResponse();
       else {
         const promptText = augmentAcpUserPrompt(userText, {
-          sessionId: sid,
           systemPrompt: ctx.systemPrompt,
           projectCwd: projectCwd || undefined,
+          bundleDir,
+          freshSpawn,
         });
         channel.send({ type: "session.prompt", turn_id: turnId, text: promptText });
       }

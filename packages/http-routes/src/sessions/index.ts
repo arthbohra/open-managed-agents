@@ -327,6 +327,19 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
     }
 
+    for (const r of body.resources ?? []) {
+      if (
+        (r.type === "github_repository" || r.type === "github_repo") &&
+        typeof r.local_path === "string" &&
+        r.local_path.trim()
+      ) {
+        const localPath = r.local_path.trim();
+        if (!isAbsoluteHostPath(localPath)) {
+          return c.json({ error: "local_path must be an absolute filesystem path" }, 400);
+        }
+      }
+    }
+
     const seenStores = new Set<string>();
     for (const r of body.resources ?? []) {
       if (r.type === "memory_store" && r.memory_store_id) {
@@ -1280,4 +1293,10 @@ async function openSse(
       "x-accel-buffering": "no",
     },
   });
+}
+
+/** Host path for local runtime repo roots (POSIX or Windows drive). */
+function isAbsoluteHostPath(path: string): boolean {
+  if (path.startsWith("/")) return true;
+  return /^[A-Za-z]:[\\/]/.test(path);
 }
