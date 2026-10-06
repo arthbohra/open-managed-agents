@@ -144,6 +144,53 @@ describe("hosted inference proxy helpers", () => {
     expect(headers.has("x-api-key")).toBe(false);
   });
 
+  it("routes protocol-prefixed openai and anthropic paths to model-card upstream bases", async () => {
+    const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
+    const endpoints = [
+      {
+        protocol: "openai-chat" as const,
+        proxyPathSegment: "openai/v1",
+        upstreamBaseUrl: "https://api.deepseek.com",
+      },
+      {
+        protocol: "anthropic-messages" as const,
+        proxyPathSegment: "anthropic",
+        upstreamBaseUrl: "https://api.deepseek.com/anthropic",
+      },
+    ];
+    await forwardHostedInferenceRequest({
+      upstream: {
+        wireModel: "deepseek-chat",
+        apiKey: "upstream-key",
+        provider: "deepseek",
+        protocolEndpoints: endpoints,
+      },
+      method: "POST",
+      subPath: "openai/v1/chat/completions",
+      inboundHeaders: new Headers({ authorization: "Bearer work" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    await forwardHostedInferenceRequest({
+      upstream: {
+        wireModel: "deepseek-chat",
+        apiKey: "upstream-key",
+        provider: "deepseek",
+        protocolEndpoints: endpoints,
+      },
+      method: "POST",
+      subPath: "anthropic/v1/messages",
+      inboundHeaders: new Headers({ "x-api-key": "work" }),
+      body: new TextEncoder().encode("{}").buffer,
+      fetcher,
+    });
+    const urls = fetcher.mock.calls.map((call) => (call as [string])[0]);
+    expect(urls).toEqual([
+      "https://api.deepseek.com/v1/chat/completions",
+      "https://api.deepseek.com/anthropic/v1/messages",
+    ]);
+  });
+
   it("uses x-api-key for anthropic upstream providers", async () => {
     const fetcher = vi.fn(async () => new Response("ok", { status: 200 }));
     await forwardHostedInferenceRequest({

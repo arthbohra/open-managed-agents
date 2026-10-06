@@ -1,4 +1,6 @@
 export { createDefaultHarnessInferenceAdapterRegistry } from "./registry.js";
+export { buildInferenceTarget, type HostedInferenceModelSource } from "./model-source.js";
+export { resolveProtocolEndpointsFromModelCard } from "./endpoint-catalog.js";
 export { wireHostedInferenceForAcpLaunch } from "./wire.js";
 export type { WireHostedInferenceInput } from "./wire.js";
 export { createEnvMappingInferenceAdapter } from "./adapters/env-mapping.js";

@@ -18,3 +18,12 @@ export class InferenceProtocolUnsupportedError extends Error {
     this.name = "InferenceProtocolUnsupportedError";
   }
 }
+
+export class InferenceEndpointsMissingError extends Error {
+  readonly code = "inference_endpoints_missing";
+
+  constructor(message = "Hosted inference requires explicit protocol endpoints on the model card") {
+    super(message);
+    this.name = "InferenceEndpointsMissingError";
+  }
+}

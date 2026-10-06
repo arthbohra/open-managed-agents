@@ -5,18 +5,23 @@ import type {
   InferenceWireProtocol,
 } from "./types.js";
 
+/** Prefer adapter protocol order over endpoint list order. */
 export function selectInferenceProtocol(
   adapter: InferenceConfigAdapter,
   endpoints: readonly InferenceProtocolEndpoint[],
 ): { protocol: InferenceWireProtocol; endpoint: InferenceProtocolEndpoint } {
-  const supported = new Set(adapter.supportedProtocols);
-  const endpoint = endpoints.find((candidate) => supported.has(candidate.protocol));
-  if (!endpoint) {
-    throw new InferenceProtocolUnsupportedError({
-      adapterId: adapter.id,
-      supported: adapter.supportedProtocols,
-      available: endpoints.map((item) => item.protocol),
-    });
+  const byProtocol = new Map(
+    endpoints.map((endpoint) => [endpoint.protocol, endpoint]),
+  );
+  for (const protocol of adapter.supportedProtocols) {
+    const endpoint = byProtocol.get(protocol);
+    if (endpoint) {
+      return { protocol, endpoint };
+    }
   }
-  return { protocol: endpoint.protocol, endpoint };
+  throw new InferenceProtocolUnsupportedError({
+    adapterId: adapter.id,
+    supported: adapter.supportedProtocols,
+    available: endpoints.map((item) => item.protocol),
+  });
 }

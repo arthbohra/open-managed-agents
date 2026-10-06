@@ -7,31 +7,36 @@ export type InferenceWireProtocol =
   | "openai-responses"
   | "gemini";
 
+/** Sandbox-relative path suffix on the session hosted-inference base URL. */
+export const INFERENCE_PROTOCOL_PROXY_PATH: Record<InferenceWireProtocol, string> = {
+  "openai-chat": "openai/v1",
+  "openai-responses": "openai/v1",
+  "anthropic-messages": "anthropic",
+  gemini: "gemini",
+};
+
 export interface InferenceProtocolEndpoint {
   protocol: InferenceWireProtocol;
-  /** Suffix path on the session hosted-inference base URL (no leading slash). */
   proxyPathSegment: string;
+  /** Provider upstream API root for this protocol (no trailing slash). */
+  upstreamBaseUrl: string;
 }
 
-/** Resolved model target available when an ACP child starts. */
+/** Resolved model target — endpoints must be supplied by the composition root. */
 export interface InferenceTargetDescriptor {
   wireModel: string;
-  provider: string;
-  baseUrl: string | null;
-  /** When set, overrides provider catalog resolution. */
-  protocolEndpoints?: readonly InferenceProtocolEndpoint[];
+  /** Model-card provider id (opaque string for harness adapters). */
+  providerId: string;
+  protocolEndpoints: readonly InferenceProtocolEndpoint[];
 }
 
 export interface HostedInferenceProxyTarget {
-  /** Session-scoped gateway base (no trailing slash). */
   proxyBaseUrl: string;
-  /** Short-lived Work capability; injected into process env only, never config files. */
   proxyToken: string;
   proxyTokenEnvVar: "HOSTED_INFERENCE_TOKEN";
 }
 
 export interface InferenceConfigFile {
-  /** Absolute path in the sandbox (under native state root). */
   path: string;
   content: string;
 }

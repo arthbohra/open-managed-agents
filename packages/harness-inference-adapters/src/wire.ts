@@ -1,14 +1,11 @@
-import {
-  createDefaultInferenceEndpointResolver,
-  projectHostedInferenceForAcpAgent,
-  type InferenceTargetDescriptor,
-} from "@open-managed-agents/acp-runtime/inference";
+import { projectHostedInferenceForAcpAgent } from "@open-managed-agents/acp-runtime/inference";
+import type { InferenceTargetDescriptor } from "@open-managed-agents/acp-runtime/inference";
 import type { AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 
+import { buildInferenceTarget, type HostedInferenceModelSource } from "./model-source.js";
 import { createDefaultHarnessInferenceAdapterRegistry } from "./registry.js";
 
 const defaultRegistry = createDefaultHarnessInferenceAdapterRegistry();
-const defaultEndpointResolver = createDefaultInferenceEndpointResolver();
 
 export interface WireHostedInferenceInput {
   sessionId: string;
@@ -17,16 +14,21 @@ export interface WireHostedInferenceInput {
   env: Record<string, string | undefined>;
   agent: AcpStatefulAgentSpec;
   nativePath: string;
-  target: InferenceTargetDescriptor;
+  model: HostedInferenceModelSource;
   enableProxy?: boolean;
 }
 
-export function wireHostedInferenceForAcpLaunch(
-  input: WireHostedInferenceInput,
-) {
+export function wireHostedInferenceForAcpLaunch(input: WireHostedInferenceInput) {
+  const target: InferenceTargetDescriptor = buildInferenceTarget(input.model);
   return projectHostedInferenceForAcpAgent({
-    ...input,
+    sessionId: input.sessionId,
+    gatewayBaseUrl: input.gatewayBaseUrl,
+    sessionsToken: input.sessionsToken,
+    env: input.env,
+    agent: input.agent,
+    nativePath: input.nativePath,
+    target,
     adapterRegistry: defaultRegistry,
-    endpointResolver: defaultEndpointResolver,
+    enableProxy: input.enableProxy,
   });
 }

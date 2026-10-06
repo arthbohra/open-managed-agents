@@ -18,15 +18,16 @@ export const piInferenceAdapter: InferenceConfigAdapter = {
       "models.json",
     );
     const baseUrl = proxyUrl(proxy, endpoint.proxyPathSegment);
-    const isDeepSeek = target.provider.toLowerCase() === "deepseek";
-    const providerId = isDeepSeek ? "deepseek" : "oma-hosted";
+    const providerId = target.providerId === "deepseek"
+      ? "deepseek"
+      : "oma-hosted";
     const models = {
       providers: {
         [providerId]: {
           baseUrl,
           apiKey: `{env:${proxy.proxyTokenEnvVar}}`,
           api: "openai-completions",
-          ...(isDeepSeek
+          ...(providerId === "deepseek"
             ? {}
             : {
               compat: {

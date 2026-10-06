@@ -14,6 +14,7 @@ import {
   bindStoredModelCardCredentials,
   extractHostedInferenceProxyToken,
   forwardHostedInferenceRequest,
+  resolveProtocolEndpointsFromModelCard,
 } from "@open-managed-agents/inference-proxy";
 import { SqlSessionSource } from "@open-managed-agents/managed-agents-adapters-sql";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
@@ -77,11 +78,17 @@ export async function resolveSessionModelUpstream(
       const key = await services.modelCards.getApiKey({ tenantId, cardId: card.id });
       if (key) {
         const bound = bindStoredModelCardCredentials(fallback, card, key);
+        const protocolEndpoints = resolveProtocolEndpointsFromModelCard({
+          providerId: card.provider,
+          baseUrl: card.base_url,
+        });
         return {
           wireModel: bound.wireModel,
           apiKey: bound.apiKey,
           baseURL: bound.baseURL,
           provider: bound.provider,
+          providerId: card.provider,
+          protocolEndpoints,
           customHeaders: bound.customHeaders,
         };
       }

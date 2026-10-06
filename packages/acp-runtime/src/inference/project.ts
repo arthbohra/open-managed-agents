@@ -3,8 +3,7 @@ import {
   projectHostedInferenceEnv,
 } from "@open-managed-agents/inference-proxy";
 
-import type { AcpStatefulAgentSpec } from "../native-state.js";
-import type { InferenceEndpointResolver } from "./endpoint-resolver.js";
+import { InferenceEndpointsMissingError } from "./errors.js";
 import { selectInferenceProtocol } from "./select-protocol.js";
 import type { InferenceConfigAdapterRegistry } from "./registry.js";
 import type {
@@ -20,11 +19,10 @@ export interface ProjectHostedInferenceInput {
   gatewayBaseUrl?: string;
   sessionsToken?: string;
   env: Record<string, string | undefined>;
-  agent: AcpStatefulAgentSpec;
+  agent: import("../native-state.js").AcpStatefulAgentSpec;
   nativePath: string;
   target: InferenceTargetDescriptor;
   adapterRegistry: InferenceConfigAdapterRegistry;
-  endpointResolver: InferenceEndpointResolver;
   enableProxy?: boolean;
 }
 
@@ -46,10 +44,6 @@ function stripProviderSecrets(
   return next;
 }
 
-/**
- * Harbor-style projection: translate hosted inference capability into
- * harness-native env, args, and config files. Core never branches on harness ids.
- */
 export function projectHostedInferenceForAcpAgent(
   input: ProjectHostedInferenceInput,
 ): ProjectHostedInferenceResult {
@@ -80,8 +74,14 @@ export function projectHostedInferenceForAcpAgent(
     return { env, files: [] };
   }
 
-  const endpoints = input.endpointResolver.resolve(input.target);
-  const { protocol, endpoint } = selectInferenceProtocol(adapter, endpoints);
+  if (input.target.protocolEndpoints.length === 0) {
+    throw new InferenceEndpointsMissingError();
+  }
+
+  const { protocol, endpoint } = selectInferenceProtocol(
+    adapter,
+    input.target.protocolEndpoints,
+  );
   const plan = adapter.plan({
     agent: input.agent,
     nativePath: input.nativePath,

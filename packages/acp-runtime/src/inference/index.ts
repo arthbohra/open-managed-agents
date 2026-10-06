@@ -8,17 +8,12 @@ export type {
   InferenceTargetDescriptor,
   InferenceWireProtocol,
 } from "./types.js";
-export { InferenceProtocolUnsupportedError } from "./errors.js";
+export { INFERENCE_PROTOCOL_PROXY_PATH } from "./types.js";
 export {
-  InferenceEndpointResolver,
-  joinHostedInferenceUrl,
-  normalizeProviderId,
-  type InferenceEndpointContributor,
-} from "./endpoint-resolver.js";
-export {
-  DEFAULT_INFERENCE_ENDPOINT_CONTRIBUTORS,
-  createDefaultInferenceEndpointResolver,
-} from "./default-endpoints.js";
+  InferenceEndpointsMissingError,
+  InferenceProtocolUnsupportedError,
+} from "./errors.js";
+export { joinHostedInferenceUrl } from "./join-url.js";
 export { InferenceConfigAdapterRegistry } from "./registry.js";
 export { selectInferenceProtocol } from "./select-protocol.js";
 export {
@@ -26,7 +21,3 @@ export {
   type ProjectHostedInferenceInput,
   type ProjectHostedInferenceResult,
 } from "./project.js";
-export {
-  inferProviderFromWireModel,
-  inferenceTargetFromWireModel,
-} from "./target.js";

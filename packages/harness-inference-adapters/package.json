@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@open-managed-agents/acp-runtime": "workspace:*"
+    "@open-managed-agents/acp-runtime": "workspace:*",
+    "@open-managed-agents/inference-proxy": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

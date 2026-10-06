@@ -1,3 +1,10 @@
+import type { InferenceProtocolEndpoint, InferenceWireProtocol } from "./protocol-types.js";
+import {
+  parseHostedInferenceSubPath,
+  resolveProtocolUpstreamUrl,
+  selectProtocolEndpoint,
+} from "./protocol-routing.js";
+
 /** Env vars that must not reach an ACP child when hosted inference proxying is on. */
 export const MODEL_PROVIDER_SECRET_ENV_KEYS = [
   "DEEPSEEK_API_KEY",
@@ -25,11 +32,24 @@ export interface HostedInferenceCapability {
   sessionsToken: string;
 }
 
+export type { InferenceProtocolEndpoint, InferenceWireProtocol } from "./protocol-types.js";
+export {
+  resolveProtocolEndpointsFromModelCard,
+  type ModelCardInferenceFields,
+} from "./endpoint-catalog.js";
+export {
+  parseHostedInferenceSubPath,
+  resolveProtocolUpstreamUrl,
+  selectProtocolEndpoint,
+} from "./protocol-routing.js";
+
 export interface ResolvedSessionModelUpstream {
   wireModel: string;
   apiKey: string;
   baseURL?: string;
   provider?: string;
+  providerId?: string;
+  protocolEndpoints?: readonly InferenceProtocolEndpoint[];
   customHeaders?: Record<string, string>;
 }
 
@@ -224,6 +244,27 @@ export function applyUpstreamProviderCredentials(
   headers.set("authorization", `Bearer ${upstream.apiKey}`);
 }
 
+export function applyUpstreamCredentialsForProtocol(
+  headers: Headers,
+  protocol: InferenceWireProtocol,
+  apiKey: string,
+): void {
+  for (const name of INBOUND_CREDENTIAL_HEADER_NAMES) {
+    headers.delete(name);
+  }
+  if (protocol === "anthropic-messages") {
+    headers.set("x-api-key", apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  if (protocol === "gemini") {
+    headers.set("x-goog-api-key", apiKey);
+    headers.delete("authorization");
+    return;
+  }
+  headers.set("authorization", `Bearer ${apiKey}`);
+}
+
 /** Forward an OpenAI-compatible inference call using host-resolved credentials. */
 export async function forwardHostedInferenceRequest(input: {
   upstream: ResolvedSessionModelUpstream;
@@ -233,16 +274,37 @@ export async function forwardHostedInferenceRequest(input: {
   body: ArrayBuffer | null;
   fetcher?: typeof fetch;
 }): Promise<Response> {
-  const upstreamUrl = resolveUpstreamInferenceUrl({
-    subPath: input.subPath,
-    baseURL: input.upstream.baseURL,
-    provider: input.upstream.provider,
-  });
+  const parsed = parseHostedInferenceSubPath(input.subPath);
+  let upstreamUrl: string | null = null;
+  const outbound = copyInboundHeadersForUpstream(input.inboundHeaders);
+  if (
+    parsed.protocol
+    && input.upstream.protocolEndpoints
+    && input.upstream.protocolEndpoints.length > 0
+  ) {
+    const endpoint = selectProtocolEndpoint(
+      input.upstream.protocolEndpoints,
+      parsed.protocol,
+    );
+    if (!endpoint) {
+      return Response.json(
+        { error: "inference_protocol_unsupported", protocol: parsed.protocol },
+        { status: 409 },
+      );
+    }
+    upstreamUrl = resolveProtocolUpstreamUrl(endpoint, parsed.relativeSubPath);
+    applyUpstreamCredentialsForProtocol(outbound, parsed.protocol, input.upstream.apiKey);
+  } else {
+    upstreamUrl = resolveUpstreamInferenceUrl({
+      subPath: input.subPath,
+      baseURL: input.upstream.baseURL,
+      provider: input.upstream.provider,
+    });
+    applyUpstreamProviderCredentials(outbound, input.upstream);
+  }
   if (!upstreamUrl) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
-  const outbound = copyInboundHeadersForUpstream(input.inboundHeaders);
-  applyUpstreamProviderCredentials(outbound, input.upstream);
   if (input.upstream.customHeaders) {
     for (const [name, value] of Object.entries(input.upstream.customHeaders)) {
       outbound.set(name, value);

@@ -12,7 +12,10 @@ import {
   managedMcpProxyFromWorkEnvironment,
   projectAcpSandboxMcpServers,
 } from "@open-managed-agents/acp-runtime/sandbox-agent";
-import { inferenceTargetFromWireModel } from "@open-managed-agents/acp-runtime/inference";
+import {
+  InferenceEndpointsMissingError,
+  type InferenceWireProtocol,
+} from "@open-managed-agents/acp-runtime/inference";
 import { wireHostedInferenceForAcpLaunch } from "@open-managed-agents/harness-inference-adapters";
 import { bindAcpAgentState, type AcpStatefulAgentSpec } from "@open-managed-agents/acp-runtime/native-state";
 import {
@@ -55,6 +58,15 @@ export interface ManagedAcpSessionAgentSnapshot {
   readonly id: string;
   readonly version: number;
   readonly model: Readonly<Record<string, unknown>> & { readonly id: string };
+  readonly inference?: {
+    readonly provider_id: string;
+    readonly base_url: string | null;
+    readonly protocol_endpoints?: readonly {
+      readonly protocol: string;
+      readonly proxy_path_segment: string;
+      readonly upstream_base_url: string;
+    }[];
+  };
   readonly mcp_servers: readonly (
     | { readonly type: "url"; readonly name: string; readonly url: string }
     | {
@@ -229,6 +241,10 @@ export function createNodeManagedAcpSupervisorApp(
         const modelHandle = typeof session.agent.model === "string"
           ? session.agent.model
           : session.agent.model.id;
+        const inference = session.agent.inference;
+        if (!inference?.provider_id) {
+          throw new InferenceEndpointsMissingError();
+        }
         const hosted = wireHostedInferenceForAcpLaunch({
           sessionId: session.id,
           gatewayBaseUrl: active.proxy.gatewayBaseUrl,
@@ -236,7 +252,16 @@ export function createNodeManagedAcpSupervisorApp(
           env: baseAgent.env ?? {},
           agent: binding.agent,
           nativePath: binding.nativePath,
-          target: inferenceTargetFromWireModel(modelHandle),
+          model: {
+            wireModel: modelHandle,
+            providerId: inference.provider_id,
+            baseUrl: inference.base_url,
+            protocolEndpoints: inference.protocol_endpoints?.map((endpoint) => ({
+              protocol: endpoint.protocol as InferenceWireProtocol,
+              proxyPathSegment: endpoint.proxy_path_segment,
+              upstreamBaseUrl: endpoint.upstream_base_url,
+            })),
+          },
         });
         for (const file of hosted.files) {
           await stateIo.writeFile(file.path, file.content);
@@ -408,6 +433,35 @@ export function decodeManagedAcpSessionSnapshot(
   });
   const skills = skillArray(agent.skills);
   const tools = recordArray(agent.tools, "agent.tools");
+  let inference: ManagedAcpSessionAgentSnapshot["inference"];
+  if (isRecord(agent.inference) && isNonEmptyString(agent.inference.provider_id)) {
+    const endpoints = agent.inference.protocol_endpoints;
+    inference = {
+      provider_id: agent.inference.provider_id,
+      base_url: typeof agent.inference.base_url === "string"
+        ? agent.inference.base_url
+        : agent.inference.base_url === null
+          ? null
+          : null,
+      ...(Array.isArray(endpoints) ? {
+        protocol_endpoints: endpoints.map((entry, index) => {
+          if (
+            !isRecord(entry)
+            || !isNonEmptyString(entry.protocol)
+            || !isNonEmptyString(entry.proxy_path_segment)
+            || !isNonEmptyString(entry.upstream_base_url)
+          ) {
+            throw invalidSession(`agent.inference.protocol_endpoints[${index}]`);
+          }
+          return {
+            protocol: entry.protocol,
+            proxy_path_segment: entry.proxy_path_segment,
+            upstream_base_url: entry.upstream_base_url,
+          };
+        }),
+      } : {}),
+    };
+  }
   return {
     ...value,
     agent: {
@@ -418,6 +472,7 @@ export function decodeManagedAcpSessionSnapshot(
       skills,
       system: agent.system,
       tools,
+      ...(inference === undefined ? {} : { inference }),
     },
   };
 }
