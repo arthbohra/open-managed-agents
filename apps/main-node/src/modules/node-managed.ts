@@ -572,7 +572,7 @@ export async function createManagedNodeRuntime(
     buildHarnessContext: async (input) => {
       const agent = toLegacyHarnessAgentConfig(input.session);
       const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
-      const pi = createPiModelRuntime({
+      const pi = agent.harness === "pi" ? createPiModelRuntime({
         model: creds.wireModel,
         apiKey: creds.apiKey,
         provider: creds.provider,
@@ -589,7 +589,7 @@ export async function createManagedNodeRuntime(
           : agent.model.speed === "fast" ? "fast" : "standard",
         thinkingLevel: typeof agent.model === "string" ? undefined
           : agent.model.effort,
-      });
+      }) : undefined;
       const rawSystemPrompt = input.session.agent.system ?? "";
       const platformReminders = [
         ...buildNodeManagedSkillReminders(input.session),
