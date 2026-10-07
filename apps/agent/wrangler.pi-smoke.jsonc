@@ -1,0 +1,6 @@
+{
+  "name": "openma-pi-workerd-smoke",
+  "main": "./test/pi-workerd-smoke.ts",
+  "compatibility_date": "2026-04-13",
+  "compatibility_flags": ["nodejs_compat"]
+}
