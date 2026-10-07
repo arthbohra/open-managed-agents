@@ -576,7 +576,7 @@ export interface AgentThreadMessageReceivedEvent extends EventBase {
 
 export interface AgentThreadContextCompactedEvent extends EventBase {
   type: "agent.thread_context_compacted";
-  /** Serialized Pi session journal needed to resume from this boundary. */
+  /** @internal Serialized Pi checkpoint. Never send in public events. */
   pi_context?: string;
   original_message_count: number;
   compacted_message_count: number;

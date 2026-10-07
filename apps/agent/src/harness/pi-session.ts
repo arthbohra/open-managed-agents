@@ -6,7 +6,6 @@ import {
   type CreateAgentSessionOptions,
   type CreateAgentSessionResult,
   type ToolDefinition,
-  type FileEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
 import { restorePiContext } from "./pi-context";
@@ -107,10 +106,7 @@ export interface HostedPiSessionOptions {
   thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
   hasPendingConfirmations?: () => boolean;
   compactionEnabled?: boolean;
-  onCompaction?: (
-    messages: Message[],
-    journal: FileEntry[],
-  ) => void | Promise<void>;
+  onCompaction?: (messages: Message[]) => void | Promise<void>;
 }
 
 export async function createHostedPiSession(
@@ -150,10 +146,6 @@ export async function createHostedPiSession(
                   convertToLlm(
                     options.sessionManager.buildSessionContext().messages,
                   ),
-                  [
-                    options.sessionManager.getHeader()!,
-                    ...options.sessionManager.getEntries(),
-                  ],
                 );
               });
             },

@@ -198,13 +198,13 @@ export class PiHarness implements HarnessInterface {
         checkpoint: saved,
         hasPendingConfirmations: () =>
           Boolean(ctx.runtime.pendingConfirmations?.length),
-        onCompaction: async (messages, journal) => {
+        onCompaction: async (messages) => {
           try {
             ctx.runtime.broadcast({
               type: "agent.thread_context_compacted",
               original_message_count: history.length,
               compacted_message_count: messages.length,
-              pi_context: encodePiContext(messages, journal),
+              pi_context: encodePiContext(messages),
             });
             await ctx.runtime.drain?.();
           } catch (error: unknown) {

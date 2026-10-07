@@ -3842,7 +3842,11 @@ export class SessionDO extends DurableObject<Env> {
     ) {
       return;
     }
-    const data = JSON.stringify(event);
+    const data = JSON.stringify(
+      event.type === "agent.thread_context_compacted"
+        ? { ...event, pi_context: undefined }
+        : event,
+    );
     // Per-socket spec-vs-extension routing. Sockets that opted into chunks
     // (tagged "chunks" in the /ws handler) receive everything; others
     // receive only Anthropic-spec event types. Keeps the spec-default

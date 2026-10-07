@@ -390,6 +390,39 @@ describe("PiHarness", () => {
     ).toHaveLength(2);
   });
 
+  it("replays older summary-only compaction events without a Pi checkpoint", async () => {
+    const { ctx, events, faux } = makeContext([]);
+    events.unshift(
+      { type: "user.message", content: [{ type: "text", text: "Old question" }] },
+      { type: "agent.message", message_id: "old", content: [{ type: "text", text: "Old answer" }] },
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 2,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "Earlier agreed fact: 42" }],
+      },
+    );
+    let requestText = "";
+    faux.setResponses([(context) => {
+      requestText = JSON.stringify(context.messages);
+      return fauxAssistantMessage("Used the saved summary");
+    }]);
+
+    await new PiHarness().run(ctx);
+
+    expect(requestText).toContain("Earlier agreed fact: 42");
+    expect(requestText).toContain("echo hello");
+  });
+
+  it("fails the turn when its event writer cannot confirm persistence", async () => {
+    const { ctx } = makeContext([fauxAssistantMessage("Uncommitted output")]);
+    ctx.runtime.drain = vi.fn(async () => {
+      throw new Error("Event storage unavailable");
+    });
+
+    await expect(new PiHarness().run(ctx)).rejects.toThrow("Event storage unavailable");
+  });
+
   it("uses the runtime thinking level for every Pi agent turn", async () => {
     const { ctx, faux } = makeContext([]);
     let reasoning: unknown;

@@ -229,6 +229,9 @@ describe("Managed Agents API — exhaustive session event history", () => {
 
     const page = await client.beta.sessions.events.list(sessionWire.id);
 
+    expect(JSON.stringify(page.data.find((event) => event.type === "agent.thread_context_compacted")))
+      .not.toContain("pi_context");
+
     expect(page.data.map((event) => event.type)).toEqual([
       "agent.custom_tool_use",
       "agent.mcp_tool_result",

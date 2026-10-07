@@ -82,4 +82,10 @@ describe("stock Pi session recovery", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("bounds the serialized post-compaction context below the event spill threshold", () => {
+    expect(() => encodePiContext([{
+      role: "user", content: "x".repeat(500_000), timestamp: 1,
+    }])).toThrow("exceeds 450 kB");
+  });
 });

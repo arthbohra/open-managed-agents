@@ -119,7 +119,10 @@ export class NodeHarnessRuntime implements HarnessRuntime {
       .then(() => this.opts.log.getEventsAsync())
       .then((all) => {
         const last = all[all.length - 1];
-        if (last) this.opts.hub.publish(this.opts.sessionId, last);
+        if (last) this.opts.hub.publish(this.opts.sessionId,
+          last.type === "agent.thread_context_compacted"
+            ? { ...last, pi_context: undefined }
+            : last);
       })
       .catch((err) => {
         this.writeFailure ??= err;

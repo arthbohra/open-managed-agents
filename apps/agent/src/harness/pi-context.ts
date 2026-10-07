@@ -8,11 +8,18 @@ import { join } from "node:path";
 
 export function encodePiContext(
   messages: readonly Message[],
-  journal?: readonly FileEntry[],
 ): string {
-  return JSON.stringify(
-    journal ? { version: 2, journal } : { version: 1, messages },
-  );
+  // Persist only the post-compaction model context, not the full append-only
+  // journal. The latter grows without bound even after native compaction.
+  const context = JSON.stringify({ version: 1, messages });
+  // The event log spills events above 500 kB; keep the wrapped checkpoint
+  // below that threshold so the compaction boundary is committed in SQLite.
+  const eventBytes = new TextEncoder().encode(
+    JSON.stringify({ pi_context: context }),
+  ).byteLength;
+  if (eventBytes > 450_000)
+    throw new Error("Pi compaction checkpoint exceeds 450 kB");
+  return context;
 }
 
 export async function restorePiContext(

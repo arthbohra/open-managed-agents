@@ -530,7 +530,6 @@ export function toSessionEventResponse(event: SessionEventView): object {
         id: event.id,
         type: event.type,
         processed_at: event.processedAt,
-        ...(event.piContext === undefined ? {} : { pi_context: event.piContext }),
       };
     case "session.status_rescheduled":
     case "session.status_running":
