@@ -526,6 +526,12 @@ export function toSessionEventResponse(event: SessionEventView): object {
         ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
       };
     case "agent.thread_context_compacted":
+      return {
+        id: event.id,
+        type: event.type,
+        processed_at: event.processedAt,
+        ...(event.piContext === undefined ? {} : { pi_context: event.piContext }),
+      };
     case "session.status_rescheduled":
     case "session.status_running":
     case "session.status_terminated":

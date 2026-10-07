@@ -366,6 +366,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
       id: z.string().min(1),
       type: z.literal("agent.thread_context_compacted"),
       processed_at: z.string(),
+      pi_context: z.string().optional(),
     })
     .strict(),
   z

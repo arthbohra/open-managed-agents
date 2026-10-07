@@ -54,6 +54,7 @@ describe("Managed Agents API — exhaustive session event history", () => {
               id: "event_06",
               type: "agent.thread_context_compacted",
               processedAt,
+              piContext: "{\"version\":1,\"messages\":[]}",
             },
             {
               id: "event_07",

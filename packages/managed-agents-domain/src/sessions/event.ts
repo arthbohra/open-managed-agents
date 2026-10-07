@@ -234,6 +234,7 @@ export type HistorySessionEvent =
       id: string;
       type: "agent.thread_context_compacted";
       processedAt: string;
+      piContext?: string;
     }
   | {
       id: string;

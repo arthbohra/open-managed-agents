@@ -119,6 +119,8 @@ export interface HarnessRuntime {
    * compaction marker, custom marker, etc.).
    */
   broadcast: (event: SessionEvent) => void;
+  /** Wait for any queued writes and surface persistence failures. */
+  drain?: () => Promise<void>;
   /**
    * Mark the start of an in-flight LLM stream and broadcast a lifecycle
    * event to subscribers. The runtime persists the stream state to the

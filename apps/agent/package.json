@@ -30,6 +30,7 @@
     "@cloudflare/sandbox": "0.12.10",
     "@earendil-works/pi-agent-core": "0.84.4",
     "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/acp-runtime": "workspace:*",

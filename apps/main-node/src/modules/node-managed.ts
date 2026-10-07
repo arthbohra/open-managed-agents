@@ -70,6 +70,8 @@ import { join } from "node:path";
 import { nanoid } from "nanoid";
 
 import { ManagedNodeDefaultHarness } from "../lib/node-managed-default-harness.js";
+import { PiHarness } from "@open-managed-agents/agent/harness/pi-loop";
+import { createPiModelRuntime } from "@open-managed-agents/agent/harness/pi-provider";
 import { allowAllLegacyHarnessTools, toLegacyHarnessAgentConfig, toLegacyHarnessEnvironmentConfig, resolveNodeManagedAuxiliaryToolModel } from "../lib/node-managed-agent-codec.js";
 import { NodeManagedConfirmedToolExecutor } from "../lib/node-managed-confirmed-tool-executor.js";
 import { NodeManagedOutcomeEvaluator } from "../lib/node-managed-outcome-evaluator.js";
@@ -562,10 +564,32 @@ export async function createManagedNodeRuntime(
       return tools;
     },
     disposeTools,
-    buildHarness: () => new ManagedNodeDefaultHarness(),
+    buildHarness: () => ({
+      run: (context: HarnessContext) => context.agent.harness === "pi"
+        ? new PiHarness().run(context)
+        : new ManagedNodeDefaultHarness().run(context),
+    }),
     buildHarnessContext: async (input) => {
       const agent = toLegacyHarnessAgentConfig(input.session);
       const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
+      const pi = createPiModelRuntime({
+        model: creds.wireModel,
+        apiKey: creds.apiKey,
+        provider: creds.provider,
+        baseURL: creds.baseURL,
+        customHeaders: creds.customHeaders,
+        piConfig: creds.piConfig,
+        providerOptions: typeof agent.model !== "string" &&
+          agent.model.provider_options?.pi &&
+          typeof agent.model.provider_options.pi === "object" &&
+          !Array.isArray(agent.model.provider_options.pi)
+            ? agent.model.provider_options.pi as Record<string, unknown>
+            : undefined,
+        speed: typeof agent.model === "string" ? undefined
+          : agent.model.speed === "fast" ? "fast" : "standard",
+        thinkingLevel: typeof agent.model === "string" ? undefined
+          : agent.model.effort,
+      });
       const rawSystemPrompt = input.session.agent.system ?? "";
       const platformReminders = [
         ...buildNodeManagedSkillReminders(input.session),
@@ -579,6 +603,7 @@ export async function createManagedNodeRuntime(
         tenant_id: input.workspaceId,
         tools: { ...input.tools, ...feishuTools },
         model: input.model,
+        pi,
         systemPrompt: composeSystemPrompt(rawSystemPrompt, platformReminders),
         rawSystemPrompt,
         platformReminders,

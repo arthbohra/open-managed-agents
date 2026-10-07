@@ -82,6 +82,12 @@ export class NodeHarnessRuntime implements HarnessRuntime {
    * collision without needing per-row locking.
    */
   private writeChain: Promise<void> = Promise.resolve();
+  private writeFailure: unknown;
+
+  async drain(): Promise<void> {
+    await this.writeChain;
+    if (this.writeFailure) throw this.writeFailure;
+  }
 
   constructor(private opts: NodeHarnessRuntimeOptions) {
     this.history = new SqlHistoryStore(opts.log);
@@ -106,18 +112,18 @@ export class NodeHarnessRuntime implements HarnessRuntime {
   broadcast = (event: SessionEvent): void => {
     this.history.appendInPlace(event);
     this.writeChain = this.writeChain
-      .then(() => this.opts.log.appendAsync(event))
+      .then(() => {
+        if (this.writeFailure) throw this.writeFailure;
+        return this.opts.log.appendAsync(event);
+      })
       .then(() => this.opts.log.getEventsAsync())
       .then((all) => {
         const last = all[all.length - 1];
         if (last) this.opts.hub.publish(this.opts.sessionId, last);
       })
       .catch((err) => {
+        this.writeFailure ??= err;
         log.warn({ err, op: "node_harness.broadcast_persist_failed" }, "broadcast persist failed");
-        // Reset the chain so a single failure doesn't poison every
-        // subsequent broadcast (the SQL adapter typically recovers on
-        // the next attempt — connection wasn't lost, just a constraint
-        // hit).
       });
   };
 

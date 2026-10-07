@@ -65,6 +65,20 @@ describe("Managed session runtime codec", () => {
     ).toEqual([]);
   });
 
+  it("preserves the Pi compaction checkpoint through the managed runtime codec", () => {
+    const checkpoint = JSON.stringify({ version: 1, messages: [] });
+    const decoded = decodeRuntimeProducedSessionEvent({
+      id: "event_compaction_01",
+      type: "agent.thread_context_compacted",
+      pi_context: checkpoint,
+      processed_at: "2026-08-26T00:00:01.000Z",
+    });
+    expect(decoded).toMatchObject({ piContext: checkpoint });
+    expect(runtimeCodec.encodeRuntimeHistoryEvent(decoded!)).toMatchObject({
+      pi_context: checkpoint,
+    });
+  });
+
   it.each(["agent.tool_result", "agent.mcp_tool_result"] as const)(
     "normalizes legacy string content on %s into official content blocks",
     (type) => {

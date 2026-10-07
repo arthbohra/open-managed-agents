@@ -7,9 +7,11 @@ export default defineConfig({
     environment: "node",
     include: [
       "apps/agent/tests/pi-loop.test.ts",
+      "apps/agent/tests/pi-session-recovery.test.ts",
       "apps/agent/tests/pi-compaction.test.ts",
       "apps/agent/tests/default-loop-span-lifecycle.test.ts",
       "apps/main-node/test/pi-sandbox-harness.e2e.test.ts",
+      "apps/main-node/test/pi-checkpoint-persistence.test.ts",
     ],
     testTimeout: 30_000,
     coverage: {
